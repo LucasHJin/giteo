@@ -46,6 +46,16 @@ def _find_system_python():
         "/usr/bin/python3",
         "/opt/homebrew/bin/python3",
     ]
+    # Check giteo project venv first (from install-resolve package_path)
+    _pf = os.path.expanduser("~/.giteo/package_path")
+    if os.path.exists(_pf):
+        with open(_pf) as _f:
+            pkg_root = _f.read().strip()
+        for venv_name in (".venv", "venv", "env"):
+            venv_py = os.path.join(pkg_root, venv_name, "bin", "python3")
+            if os.path.exists(venv_py):
+                candidates.insert(1, venv_py)  # High priority
+                break
     # Check versioned Pythons (3.9-3.13) in common locations
     import glob
     for pattern in [

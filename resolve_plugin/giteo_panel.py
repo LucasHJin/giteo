@@ -24,6 +24,19 @@ else:
         if _root and os.path.isdir(os.path.join(_root, "giteo")) and _root not in sys.path:
             sys.path.insert(0, _root)
 
+# Resolve may inject 'resolve' into the script's globals when run from Workspace > Scripts.
+# Imported modules don't see it — inject into builtins so launcher/tkinter can access it.
+# Fallback: get it via DaVinciResolveScript (required when injection doesn't happen).
+try:
+    import builtins
+    try:
+        builtins.resolve = resolve  # noqa: F821
+    except NameError:
+        import DaVinciResolveScript as _dvr
+        builtins.resolve = _dvr.scriptapp("Resolve")
+except Exception:
+    pass
+
 try:
     from resolve_plugin.giteo_panel_launcher import main
     main()

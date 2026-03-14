@@ -8,10 +8,28 @@ Usage: python giteo_panel_qt.py --project-dir /path/to/project --port 12345
 """
 import argparse
 import json
+import os
 import socket
 import sys
 import threading
+import traceback
 from functools import partial
+
+# -- Debug logging (survives crash, goes to ~/.giteo/panel_debug.log)
+_DEBUG_LOG_PATH = os.path.expanduser("~/.giteo/panel_debug.log")
+_DEBUG_ENABLED = True  # Set to False to disable; enable for debugging crashes
+
+
+def _debug(msg: str):
+    if _DEBUG_ENABLED:
+        try:
+            os.makedirs(os.path.dirname(_DEBUG_LOG_PATH), exist_ok=True)
+            with open(_DEBUG_LOG_PATH, "a", encoding="utf-8") as f:
+                f.write(f"[giteo-qt] {msg}\n")
+                f.flush()
+        except Exception:
+            pass
+        print(f"[giteo-qt] {msg}", flush=True)
 
 from PySide6.QtCore import (
     Qt, Signal, QObject, QThread, Slot, QPropertyAnimation, 
@@ -476,6 +494,102 @@ class CollapsibleSection(QWidget):
     def add_layout(self, layout):
         """Add a layout to the content area."""
         self._content_layout.addLayout(layout)
+
+
+# -- Actions Section Widget ---------------------------------------------------
+# Uses inline inputs instead of modal dialogs to avoid macOS crash with QInputDialog.
+
+class ActionsSection(QWidget):
+    """Quick actions with inline inputs (no modal dialogs)."""
+
+    new_branch_requested = Signal(str)   # branch name
+    switch_branch_requested = Signal(str)
+    merge_branch_requested = Signal(str)
+    push_requested = Signal()
+    pull_requested = Signal()
+    status_requested = Signal()
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+
+        layout = QVBoxLayout(self)
+        layout.setSpacing(8)
+        layout.setContentsMargins(0, 0, 0, 0)
+
+        # New Branch: inline input
+        new_row = QHBoxLayout()
+        self._new_input = QLineEdit()
+        self._new_input.setPlaceholderText("New branch name...")
+        self._new_input.setStyleSheet(f"""
+            QLineEdit {{ background-color: {BG_INPUT}; color: {TEXT_PRIMARY};
+                border: 1px solid {BORDER}; border-radius: 4px; padding: 6px; }}
+        """)
+        new_row.addWidget(self._new_input)
+        self._new_btn = QPushButton("Create")
+        self._new_btn.setObjectName("primaryBtn")
+        self._new_btn.clicked.connect(self._on_new_branch_click)
+        new_row.addWidget(self._new_btn)
+        layout.addLayout(new_row)
+
+        # Switch Branch: combo + button
+        switch_row = QHBoxLayout()
+        self._switch_combo = QComboBox()
+        self._switch_combo.setMinimumWidth(120)
+        switch_row.addWidget(self._switch_combo)
+        self._switch_btn = QPushButton("Switch")
+        self._switch_btn.clicked.connect(self._on_switch_click)
+        switch_row.addWidget(self._switch_btn)
+        layout.addLayout(switch_row)
+
+        # Merge Branch: combo + button
+        merge_row = QHBoxLayout()
+        self._merge_combo = QComboBox()
+        self._merge_combo.setMinimumWidth(120)
+        merge_row.addWidget(self._merge_combo)
+        self._merge_btn = QPushButton("Merge")
+        self._merge_btn.clicked.connect(self._on_merge_click)
+        merge_row.addWidget(self._merge_btn)
+        layout.addLayout(merge_row)
+
+        # Push, Pull, Status
+        btn_row = QHBoxLayout()
+        self._push_btn = QPushButton("Push")
+        self._push_btn.clicked.connect(self.push_requested.emit)
+        self._pull_btn = QPushButton("Pull")
+        self._pull_btn.clicked.connect(self.pull_requested.emit)
+        self._status_btn = QPushButton("Status")
+        self._status_btn.clicked.connect(self.status_requested.emit)
+        btn_row.addWidget(self._push_btn)
+        btn_row.addWidget(self._pull_btn)
+        btn_row.addWidget(self._status_btn)
+        layout.addLayout(btn_row)
+
+    def _on_new_branch_click(self):
+        _debug("ActionsSection._on_new_branch_click")
+        name = self._new_input.text().strip()
+        if name:
+            self.new_branch_requested.emit(name)
+            self._new_input.clear()
+
+    def _on_switch_click(self):
+        _debug("ActionsSection._on_switch_click")
+        target = self._switch_combo.currentText()
+        if target:
+            self.switch_branch_requested.emit(target)
+
+    def _on_merge_click(self):
+        _debug("ActionsSection._on_merge_click")
+        target = self._merge_combo.currentText()
+        if target:
+            self.merge_branch_requested.emit(target)
+
+    def set_branches(self, branches: list, current: str):
+        """Populate switch/merge combos. Call after list_branches."""
+        self._switch_combo.clear()
+        self._switch_combo.addItems(branches or [])
+        self._merge_combo.clear()
+        merge_targets = [b for b in (branches or []) if b != current]
+        self._merge_combo.addItems(merge_targets)
 
 
 # -- Change Item Widget -------------------------------------------------------
@@ -978,6 +1092,37 @@ class GiteoPanel(QMainWindow):
         sections_layout.setSpacing(8)
         sections_layout.setContentsMargins(0, 0, 0, 0)
 
+        # ACTIONS section
+        self._actions_section = CollapsibleSection("ACTIONS")
+        self._actions_widget = ActionsSection()
+        self._actions_widget.new_branch_requested.connect(self.on_new_branch)
+        self._actions_widget.switch_branch_requested.connect(self.on_switch_branch)
+        self._actions_widget.merge_branch_requested.connect(self.on_merge_branch)
+        self._actions_widget.push_requested.connect(self.on_push)
+        self._actions_widget.pull_requested.connect(self.on_pull)
+        self._actions_widget.status_requested.connect(self.on_status)
+        self._actions_section.add_widget(self._actions_widget)
+        sections_layout.addWidget(self._actions_section)
+
+        # STATUS / LOG section
+        self._log_section = CollapsibleSection("LOG")
+        self._log_text = QTextEdit()
+        self._log_text.setReadOnly(True)
+        self._log_text.setMaximumHeight(120)
+        self._log_text.setStyleSheet(f"""
+            QTextEdit {{
+                background-color: {BG_INPUT};
+                color: {TEXT_PRIMARY};
+                border: 1px solid {BORDER};
+                border-radius: 5px;
+                padding: 8px;
+                font-family: "SF Mono", "Monaco", "Consolas", monospace;
+                font-size: 11px;
+            }}
+        """)
+        self._log_section.add_widget(self._log_text)
+        sections_layout.addWidget(self._log_section)
+
         # CHANGES section
         self._changes_section = CollapsibleSection("CHANGES")
         self._changes_widget = ChangesSection()
@@ -1035,46 +1180,54 @@ class GiteoPanel(QMainWindow):
         main_layout.addWidget(self._tab)
 
         # Initial data load
-        self.refresh_branch()
+        self._append_log("Giteo panel ready.")
+        self.refresh_branches_list()  # populates branch label + switch/merge combos
         self.refresh_changes()
         self.refresh_commits()
 
     def _run_async(self, request, callback):
-        """Run an IPC request on a background thread."""
-        thread = QThread()
-        worker = Worker(self.ipc, request)
-        worker.moveToThread(thread)
-        thread.started.connect(worker.run)
-        worker.finished.connect(
-            lambda result: self._on_worker_done(thread, worker, callback, result),
-            Qt.QueuedConnection
-        )
-        worker.error.connect(
-            lambda err: self._on_worker_error(thread, worker, err),
-            Qt.QueuedConnection
-        )
-        self._threads.append((thread, worker))
-        thread.start()
+        """Run IPC request. Uses QTimer to defer to event loop (avoids QThread crash on macOS)."""
+        _debug(f"_run_async action={request.get('action', '?')}")
 
-    def _on_worker_done(self, thread, worker, callback, result):
-        thread.quit()
-        thread.wait()
-        self._threads = [(t, w) for t, w in self._threads if t is not thread]
-        callback(result)
+        def do_request():
+            _debug(f"do_request starting for {request.get('action', '?')}")
+            try:
+                result = self.ipc.send(request)
+                _debug(f"do_request got result ok={result.get('ok')}")
+                callback(result)
+            except Exception as e:
+                _debug(f"do_request EXCEPTION: {e}\n{traceback.format_exc()}")
+                self._append_log(f"Error: {e}")
 
-    def _on_worker_error(self, thread, worker, err):
-        thread.quit()
-        thread.wait()
-        self._threads = [(t, w) for t, w in self._threads if t is not thread]
-        print(f"[vit] Error: {err}")
+        QTimer.singleShot(0, do_request)
+
+    def _append_log(self, msg: str):
+        try:
+            self._log_text.append(msg)
+            sb = self._log_text.verticalScrollBar()
+            if sb:
+                sb.setValue(sb.maximum())
+        except Exception as e:
+            _debug(f"_append_log EXCEPTION: {e}")
 
     def refresh_branch(self):
         self._run_async({"action": "get_branch"}, self._on_branch_result)
+
+    def refresh_branches_list(self):
+        """Fetch full branch list and update combos + label."""
+        self._run_async({"action": "list_branches"}, self._on_branches_list_result)
 
     def _on_branch_result(self, result):
         if result.get("ok"):
             branch = result.get("branch", "?")
             self.branch_label.setText(f"BRANCH: {branch}")
+
+    def _on_branches_list_result(self, result):
+        if result.get("ok"):
+            branches = result.get("branches", [])
+            current = result.get("current", "?")
+            self.branch_label.setText(f"BRANCH: {current}")
+            self._actions_widget.set_branches(branches, current)
 
     def refresh_changes(self):
         self._run_async({"action": "get_changes"}, self._on_changes_result)
@@ -1102,17 +1255,110 @@ class GiteoPanel(QMainWindow):
 
     def on_save(self, message: str):
         """Handle commit request from Changes section."""
+        _debug(f"on_save(message={repr(message)})")
         if not message:
             message = "save version"
         self._run_async({"action": "save", "message": message}, self._on_save_result)
 
     def _on_save_result(self, result):
         if result.get("ok"):
+            self._append_log(f"Saved. {result.get('message', result.get('hash', ''))}")
             self.refresh_branch()
             self.refresh_changes()
             self.refresh_commits()
         else:
-            print(f"[vit] Save failed: {result.get('error', '?')}")
+            self._append_log(f"Save failed: {result.get('error', '?')}")
+
+    def on_new_branch(self, name: str):
+        """Called with inline input value (no dialog)."""
+        _debug(f"on_new_branch(name={repr(name)})")
+        if not name or not name.strip():
+            return
+        name = name.strip()
+        _debug("on_new_branch: about to _append_log")
+        self._append_log(f"Creating branch '{name}'...")
+        _debug("on_new_branch: about to _run_async")
+        self._run_async({"action": "new_branch", "name": name}, self._on_new_branch_result)
+        _debug("on_new_branch: _run_async called")
+
+    def _on_new_branch_result(self, result):
+        if result.get("ok"):
+            self._append_log(f"Switched to '{result.get('branch', '')}'.")
+            self.refresh_branches_list()
+            self.refresh_commits()
+        else:
+            self._append_log(f"Error: {result.get('error', '?')}")
+
+    def on_switch_branch(self, target: str):
+        """Called with combo selection (no dialog)."""
+        _debug(f"on_switch_branch(target={repr(target)})")
+        if not target:
+            return
+        self._append_log(f"Switching to '{target}'...")
+        self._run_async({"action": "switch_branch", "branch": target}, self._on_switch_result)
+
+    def _on_switch_result(self, result):
+        if result.get("ok"):
+            self._append_log(f"Switched. Timeline restored." if result.get("restored") else "Switched.")
+            self.refresh_branches_list()
+            self.refresh_changes()
+            self.refresh_commits()
+        else:
+            self._append_log(f"Error: {result.get('error', '?')}")
+
+    def on_merge_branch(self, target: str):
+        """Called with combo selection (no dialog)."""
+        _debug(f"on_merge_branch(target={repr(target)})")
+        if not target:
+            return
+        current = self.branch_label.text().replace("BRANCH: ", "").strip()
+        self._append_log(f"Merging '{target}' into '{current}'...")
+        self._run_async({"action": "merge", "branch": target}, self._on_merge_result)
+
+    def _on_merge_result(self, result):
+        if result.get("ok"):
+            self._append_log(f"Merged '{result.get('branch', '')}'.")
+            if result.get("issues"):
+                self._append_log(result["issues"])
+            self.refresh_branches_list()
+            self.refresh_changes()
+            self.refresh_commits()
+        else:
+            self._append_log(f"Merge failed: {result.get('error', '?')}")
+
+    def on_push(self):
+        self._append_log("Pushing...")
+        self._run_async({"action": "push"}, self._on_push_result)
+
+    def _on_push_result(self, result):
+        if result.get("ok"):
+            self._append_log(f"Pushed {result.get('branch', '')}. {result.get('output', '')}")
+        else:
+            self._append_log(f"Push failed: {result.get('error', '?')}")
+
+    def on_pull(self):
+        self._append_log("Pulling...")
+        self._run_async({"action": "pull"}, self._on_pull_result)
+
+    def _on_pull_result(self, result):
+        if result.get("ok"):
+            self._append_log(f"Pulled {result.get('branch', '')}. Timeline restored.")
+            self.refresh_branch()
+            self.refresh_changes()
+            self.refresh_commits()
+        else:
+            self._append_log(f"Pull failed: {result.get('error', '?')}")
+
+    def on_status(self):
+        self._run_async({"action": "status"}, self._on_status_result)
+
+    def _on_status_result(self, result):
+        if result.get("ok"):
+            self._append_log(f"Branch: {result.get('branch', '')}")
+            self._append_log(result.get("status", ""))
+            self._append_log("Recent:\n" + (result.get("log", "") or ""))
+        else:
+            self._append_log(f"Error: {result.get('error', '?')}")
 
     def toggle_panel(self):
         """Slide the panel in/out from the left edge."""
@@ -1156,17 +1402,23 @@ class GiteoPanel(QMainWindow):
 # -- Entry Point --------------------------------------------------------------
 
 def main():
+    _debug("main() starting")
     parser = argparse.ArgumentParser(description="Giteo PySide6 Panel (VIT)")
     parser.add_argument("--project-dir", required=True)
     parser.add_argument("--port", type=int, required=True)
     args = parser.parse_args()
+    _debug(f"project_dir={args.project_dir} port={args.port}")
 
     app = QApplication(sys.argv)
     app.setApplicationName("vit")
+    _debug("QApplication created")
 
     ipc = IPCClient(args.port)
+    _debug("IPCClient connected")
     window = GiteoPanel(ipc, args.project_dir)
+    _debug("GiteoPanel created")
     window.show()
+    _debug("window.show() done, entering event loop")
 
     sys.exit(app.exec())
 

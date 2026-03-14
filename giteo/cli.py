@@ -385,12 +385,12 @@ RESOLVE_SCRIPTS_DIR = os.path.expanduser(
 )
 
 RESOLVE_SCRIPT_NAMES = [
-    "giteo_panel_launcher.py",
+    "giteo_panel.py",
 ]
 
 
 _RESOLVE_MENU_NAMES = {
-    "giteo_panel_launcher.py": "Giteo.py",
+    "giteo_panel.py": "Giteo.py",
 }
 
 
@@ -434,8 +434,8 @@ def cmd_install_resolve(args):
         f.write(package_dir)
     print(f"  Saved package path: {package_dir}")
 
-    print(f"\n  Installed {len(RESOLVE_SCRIPT_NAMES)} scripts to Resolve.")
-    print("  Restart Resolve, then find them under Workspace > Scripts.")
+    print(f"\n  Installed {len(RESOLVE_SCRIPT_NAMES)} script(s) to Resolve.")
+    print("  Restart Resolve, then run Workspace > Scripts > Giteo for the unified panel.")
 
 
 def cmd_uninstall_resolve(args):
