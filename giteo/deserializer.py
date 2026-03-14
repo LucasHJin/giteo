@@ -105,14 +105,7 @@ def _clear_timeline(timeline) -> None:
     Resolve's scripting API has limited deletion support, so we try
     multiple approaches and silently skip any that aren't available.
     """
-    # Clear markers first (well-supported API)
-    try:
-        markers = timeline.GetMarkers()
-        if markers:
-            for frame in list(markers.keys()):
-                timeline.DeleteMarkerAtFrame(frame)
-    except (AttributeError, TypeError):
-        pass
+    _clear_markers(timeline)
 
     # Try to remove clips from each track
     for track_type in ["video", "audio"]:
@@ -129,6 +122,17 @@ def _clear_timeline(timeline) -> None:
                     timeline.DeleteClips(clips, False)
             except (AttributeError, TypeError):
                 pass
+
+
+def _clear_markers(timeline) -> None:
+    """Remove all timeline markers when the API supports it."""
+    try:
+        markers = timeline.GetMarkers()
+        if markers:
+            for frame in list(markers.keys()):
+                timeline.DeleteMarkerAtFrame(frame)
+    except (AttributeError, TypeError):
+        pass
 
 
 def _apply_video_tracks(timeline, media_pool, video_tracks: List[VideoTrack], manifest: dict) -> None:
@@ -375,3 +379,15 @@ def deserialize_timeline(timeline, project, project_dir: str, resolve_app=None) 
     _apply_markers(timeline, markers)
 
     print(f"  Restored timeline '{metadata.timeline_name}' from giteo snapshot")
+
+
+def restore_timeline_overlays(timeline, project_dir: str, resolve_app=None) -> None:
+    """Apply color grades and markers onto the current timeline without rebuilding clips."""
+    color_grades = _load_color(project_dir)
+    markers = _load_markers(project_dir)
+
+    _apply_color(timeline, color_grades, project_dir, resolve_app=resolve_app)
+    _clear_markers(timeline)
+    _apply_markers(timeline, markers)
+
+    print("  Restored timeline overlays from giteo snapshot")

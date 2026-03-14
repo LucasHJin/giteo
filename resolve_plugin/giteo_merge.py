@@ -25,6 +25,7 @@ else:
 
 
 def main():
+    from giteo.json_writer import read_all_domain_files
     from resolve_plugin.plugin_utils import (
         auto_save_current_timeline, check_resolve, get_project_dir, ask_choice,
         show_error, show_message, _log,
@@ -34,7 +35,7 @@ def main():
         git_is_clean, git_list_branches, git_list_conflicted_files,
         git_merge, GitError,
     )
-    from giteo.deserializer import deserialize_timeline
+    from giteo.deserializer import deserialize_timeline, restore_timeline_overlays
     from giteo.validator import validate_project, format_issues
 
     try:
@@ -76,6 +77,8 @@ def main():
         _resolve, project_dir, f"merging '{branch}' into '{current}'"
     ):
         return
+
+    pre_merge_files = read_all_domain_files(project_dir)
 
     # Keep the existing safeguard for already-dirty project files on disk.
     if not git_is_clean(project_dir):
@@ -125,8 +128,19 @@ def main():
         project = _resolve.GetProjectManager().GetCurrentProject()
         timeline = project.GetCurrentTimeline()
         if timeline:
-            deserialize_timeline(timeline, project, project_dir, resolve_app=_resolve)
-            msg += "\n\nTimeline restored."
+            merged_files = read_all_domain_files(project_dir)
+            structural_domains = ["cuts", "audio", "metadata", "manifest"]
+            overlays_only = all(
+                pre_merge_files.get(domain, {}) == merged_files.get(domain, {})
+                for domain in structural_domains
+            )
+
+            if overlays_only:
+                restore_timeline_overlays(timeline, project_dir, resolve_app=_resolve)
+                msg += "\n\nTimeline overlays restored."
+            else:
+                deserialize_timeline(timeline, project, project_dir, resolve_app=_resolve)
+                msg += "\n\nTimeline restored."
 
         show_message("Giteo", msg)
     else:
