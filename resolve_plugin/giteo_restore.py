@@ -26,7 +26,8 @@ else:
 
 def main():
     from resolve_plugin.plugin_utils import (
-        check_resolve, get_project_dir, ask_choice, show_error, show_message, _log,
+        auto_save_current_timeline, check_resolve, get_project_dir, ask_choice,
+        show_error, show_message, _log,
     )
     from giteo.core import git_checkout, git_current_branch, git_list_branches
     from giteo.deserializer import deserialize_timeline
@@ -58,6 +59,10 @@ def main():
         _log("To switch from CLI: giteo checkout <branch>")
         return
     if target != current:
+        if not auto_save_current_timeline(
+            _resolve, project_dir, f"switching to '{target}'"
+        ):
+            return
         try:
             git_checkout(project_dir, target)
             _log(f"Switched to '{target}'")
@@ -68,7 +73,7 @@ def main():
     project = _resolve.GetProjectManager().GetCurrentProject()
     timeline = project.GetCurrentTimeline()
     if timeline:
-        deserialize_timeline(timeline, project, project_dir)
+        deserialize_timeline(timeline, project, project_dir, resolve_app=_resolve)
         if target == current:
             show_message("Giteo", f"Restored timeline from '{target}'.")
         else:

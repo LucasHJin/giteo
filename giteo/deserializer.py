@@ -3,8 +3,8 @@
 Reads the JSON files and applies the state back to a Resolve timeline.
 """
 
-import json
 import os
+import time
 from typing import Dict, List
 
 from .json_writer import read_json
@@ -105,14 +105,7 @@ def _clear_timeline(timeline) -> None:
     Resolve's scripting API has limited deletion support, so we try
     multiple approaches and silently skip any that aren't available.
     """
-    # Clear markers first (well-supported API)
-    try:
-        markers = timeline.GetMarkers()
-        if markers:
-            for frame in list(markers.keys()):
-                timeline.DeleteMarkerAtFrame(frame)
-    except (AttributeError, TypeError):
-        pass
+    _clear_markers(timeline)
 
     # Try to remove clips from each track
     for track_type in ["video", "audio"]:
@@ -129,6 +122,17 @@ def _clear_timeline(timeline) -> None:
                     timeline.DeleteClips(clips, False)
             except (AttributeError, TypeError):
                 pass
+
+
+def _clear_markers(timeline) -> None:
+    """Remove all timeline markers when the API supports it."""
+    try:
+        markers = timeline.GetMarkers()
+        if markers:
+            for frame in list(markers.keys()):
+                timeline.DeleteMarkerAtFrame(frame)
+    except (AttributeError, TypeError):
+        pass
 
 
 def _apply_video_tracks(timeline, media_pool, video_tracks: List[VideoTrack], manifest: dict) -> None:
@@ -184,47 +188,152 @@ def _apply_audio_tracks(timeline, media_pool, audio_tracks: List[AudioTrack], ma
                     pass
 
 
+def _apply_grade_from_drx(timeline, clip, drx_path: str, item_id: str) -> bool:
+    """Apply a DRX grade using whichever Resolve API is actually available."""
+    timeline_apply = getattr(timeline, "ApplyGradeFromDRX", None)
+    if callable(timeline_apply):
+        for args in ((drx_path, 0, [clip]), (drx_path, 0, clip)):
+            try:
+                result = timeline_apply(*args)
+                if isinstance(result, bool):
+                    return result
+            except TypeError:
+                continue
+            except Exception as e:
+                print(f"  Warning: Timeline DRX apply failed for {item_id}: {e}")
+                break
+
+    get_node_graph = getattr(clip, "GetNodeGraph", None)
+    if callable(get_node_graph):
+        try:
+            node_graph = get_node_graph()
+        except Exception as e:
+            print(f"  Warning: Could not access node graph for {item_id}: {e}")
+            node_graph = None
+
+        graph_apply = getattr(node_graph, "ApplyGradeFromDRX", None) if node_graph else None
+        if callable(graph_apply):
+            try:
+                result = graph_apply(drx_path, 0)
+                if isinstance(result, bool):
+                    return result
+            except Exception as e:
+                print(f"  Warning: Node graph DRX apply failed for {item_id}: {e}")
+
+    print(f"  Warning: DRX restore API unavailable for {item_id}")
+    return False
+
+
+def _frame_to_tc(frame: int, start_frame: int, start_tc: str, fps: float) -> str:
+    """Convert an absolute timeline frame to timecode."""
+    parts = start_tc.split(":")
+    hh, mm, ss, ff = int(parts[0]), int(parts[1]), int(parts[2]), int(parts[3])
+    ifps = int(round(fps))
+    start_total = ((hh * 3600 + mm * 60 + ss) * ifps) + ff
+
+    total = start_total + (frame - start_frame)
+    if total < 0:
+        total = 0
+
+    out_ff = total % ifps
+    total_secs = total // ifps
+    out_ss = total_secs % 60
+    total_mins = total_secs // 60
+    out_mm = total_mins % 60
+    out_hh = total_mins // 60
+    return f"{out_hh:02d}:{out_mm:02d}:{out_ss:02d}:{out_ff:02d}"
+
+
+def _focus_clip_for_color_page(timeline, clip):
+    """Move the playhead to the clip so Color page APIs act on the right item."""
+    try:
+        fps = float(timeline.GetSetting("timelineFrameRate") or 24)
+        start_frame = int(timeline.GetStartFrame())
+        start_tc = timeline.GetStartTimecode() or "01:00:00:00"
+        clip_start = int(clip.GetStart())
+    except (AttributeError, TypeError, ValueError):
+        return clip
+
+    tc = _frame_to_tc(clip_start + 1, start_frame, start_tc, fps)
+    try:
+        timeline.SetCurrentTimecode(tc)
+        time.sleep(0.15)
+        for _ in range(3):
+            current = timeline.GetCurrentTimecode()
+            if current == tc:
+                break
+            timeline.SetCurrentTimecode(tc)
+            time.sleep(0.15)
+    except (AttributeError, TypeError):
+        return clip
+
+    try:
+        current_clip = timeline.GetCurrentVideoItem()
+        if current_clip:
+            return current_clip
+    except (AttributeError, TypeError):
+        pass
+
+    return clip
+
+
 def _apply_color(timeline, color_grades: Dict[str, ColorGrade],
-                 project_dir: str = "") -> None:
+                 project_dir: str = "", resolve_app=None) -> None:
     """Apply color grading data to clips on the timeline.
 
     Applies DRX grade stills when available (full grade restore),
     and falls back to LUT-only restore from structural info.
     """
     grades_dir = os.path.join(project_dir, "timeline", "grades") if project_dir else ""
+    saved_page = None
 
-    track_count = timeline.GetTrackCount("video")
-    for track_idx in range(1, track_count + 1):
-        clips = timeline.GetItemListInTrack("video", track_idx)
-        if not clips:
-            continue
+    if resolve_app:
+        try:
+            saved_page = resolve_app.GetCurrentPage()
+            if saved_page != "color":
+                resolve_app.OpenPage("color")
+                time.sleep(0.3)
+        except (AttributeError, TypeError):
+            saved_page = None
 
-        for i, clip in enumerate(clips):
-            item_id = f"item_{track_idx:03d}_{i:03d}"
-            grade = color_grades.get(item_id)
-            if not grade:
+    try:
+        track_count = timeline.GetTrackCount("video")
+        for track_idx in range(1, track_count + 1):
+            clips = timeline.GetItemListInTrack("video", track_idx)
+            if not clips:
                 continue
 
-            # Try DRX grade restore first (complete grade data)
-            if grade.drx_file and grades_dir:
-                drx_path = os.path.join(grades_dir, grade.drx_file)
-                if os.path.exists(drx_path):
-                    try:
-                        success = timeline.ApplyGradeFromDRX(
-                            drx_path, 0, clip)
-                        if success:
-                            continue
-                    except (AttributeError, TypeError):
-                        pass
+            for i, clip in enumerate(clips):
+                item_id = f"item_{track_idx:03d}_{i:03d}"
+                grade = color_grades.get(item_id)
+                if not grade:
+                    continue
 
-            # Fallback: apply LUTs from structural info
-            for node_info in grade.nodes:
-                lut = node_info.get("lut", "")
-                if lut:
-                    try:
-                        clip.SetLUT(node_info["index"], lut)
-                    except (AttributeError, TypeError):
-                        pass
+                # Try DRX grade restore first (complete grade data)
+                if grade.drx_file and grades_dir:
+                    drx_path = os.path.join(grades_dir, grade.drx_file)
+                    if os.path.exists(drx_path):
+                        target_clip = _focus_clip_for_color_page(timeline, clip)
+                        if _apply_grade_from_drx(timeline, target_clip, drx_path, item_id):
+                            time.sleep(0.1)
+                            continue
+                    else:
+                        print(f"  Warning: Missing DRX file for {item_id}: {drx_path}")
+
+                # Fallback: apply LUTs from structural info
+                for node_info in grade.nodes:
+                    lut = node_info.get("lut", "")
+                    if lut:
+                        try:
+                            clip.SetLUT(node_info["index"], lut)
+                        except (AttributeError, TypeError):
+                            pass
+    finally:
+        if saved_page and resolve_app and saved_page != "color":
+            try:
+                resolve_app.OpenPage(saved_page)
+            except (AttributeError, TypeError):
+                pass
 
 
 def _apply_markers(timeline, markers: List[Marker]) -> None:
@@ -239,7 +348,7 @@ def _apply_markers(timeline, markers: List[Marker]) -> None:
         )
 
 
-def deserialize_timeline(timeline, project, project_dir: str) -> None:
+def deserialize_timeline(timeline, project, project_dir: str, resolve_app=None) -> None:
     """Deserialize domain-split JSON files back into a Resolve timeline.
 
     Clears the existing timeline content first, then re-applies the full
@@ -266,7 +375,19 @@ def deserialize_timeline(timeline, project, project_dir: str) -> None:
     _apply_metadata(timeline, project, metadata)
     _apply_video_tracks(timeline, media_pool, video_tracks, manifest)
     _apply_audio_tracks(timeline, media_pool, audio_tracks, manifest)
-    _apply_color(timeline, color_grades, project_dir)
+    _apply_color(timeline, color_grades, project_dir, resolve_app=resolve_app)
     _apply_markers(timeline, markers)
 
     print(f"  Restored timeline '{metadata.timeline_name}' from giteo snapshot")
+
+
+def restore_timeline_overlays(timeline, project_dir: str, resolve_app=None) -> None:
+    """Apply color grades and markers onto the current timeline without rebuilding clips."""
+    color_grades = _load_color(project_dir)
+    markers = _load_markers(project_dir)
+
+    _apply_color(timeline, color_grades, project_dir, resolve_app=resolve_app)
+    _clear_markers(timeline)
+    _apply_markers(timeline, markers)
+
+    print("  Restored timeline overlays from giteo snapshot")
