@@ -26,14 +26,14 @@ else:
 
 def main():
     from resolve_plugin.plugin_utils import (
-        check_resolve, get_project_dir, ask_choice, show_error, show_message, _log,
+        auto_save_current_timeline, check_resolve, get_project_dir, ask_choice,
+        show_error, show_message, _log,
     )
     from giteo.core import (
         git_add, git_checkout_theirs, git_commit, git_current_branch,
         git_is_clean, git_list_branches, git_list_conflicted_files,
         git_merge, GitError,
     )
-    from giteo.serializer import serialize_timeline
     from giteo.deserializer import deserialize_timeline
     from giteo.validator import validate_project, format_issues
 
@@ -70,18 +70,19 @@ def main():
         _log("To merge from CLI: giteo merge <branch>")
         return
 
-    # Auto-save current state before merging — prevents "uncommitted changes"
-    # and "untracked files would be overwritten" errors from git merge
+    # Always serialize the active timeline before merge. Resolve changes exist
+    # in memory until saved, so git status cannot reliably detect them.
+    if not auto_save_current_timeline(
+        _resolve, project_dir, f"merging '{branch}' into '{current}'"
+    ):
+        return
+
+    # Keep the existing safeguard for already-dirty project files on disk.
     if not git_is_clean(project_dir):
-        _log("Working directory has uncommitted changes — auto-saving before merge...")
-        project = _resolve.GetProjectManager().GetCurrentProject()
-        timeline = project.GetCurrentTimeline()
-        if timeline:
-            serialize_timeline(timeline, project, project_dir, resolve_app=_resolve)
+        _log("Working directory still has uncommitted giteo files — committing them...")
         git_add(project_dir, ["timeline/", "assets/", ".giteo/", ".gitignore"])
         try:
             git_commit(project_dir, f"giteo: auto-save before merging '{branch}'")
-            _log("Auto-saved.")
         except GitError as e:
             if "nothing to commit" not in str(e):
                 show_error("Giteo", f"Auto-save failed:\n{e}")
@@ -124,7 +125,7 @@ def main():
         project = _resolve.GetProjectManager().GetCurrentProject()
         timeline = project.GetCurrentTimeline()
         if timeline:
-            deserialize_timeline(timeline, project, project_dir)
+            deserialize_timeline(timeline, project, project_dir, resolve_app=_resolve)
             msg += "\n\nTimeline restored."
 
         show_message("Giteo", msg)

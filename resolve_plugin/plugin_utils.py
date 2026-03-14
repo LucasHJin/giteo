@@ -188,3 +188,50 @@ def check_resolve(resolve_var):
         )
         return False
     return True
+
+
+def auto_save_current_timeline(resolve_var, project_dir, reason):
+    """Serialize and commit the active timeline before changing git state.
+
+    Resolve timeline edits live in-memory until giteo serializes them, so git
+    status alone cannot detect unsaved timeline changes.
+    """
+    try:
+        from giteo.core import GitError, git_add, git_commit
+        from giteo.serializer import serialize_timeline
+    except Exception as e:
+        show_error("Giteo", f"Could not load auto-save helpers:\n{e}")
+        return False
+
+    try:
+        project = resolve_var.GetProjectManager().GetCurrentProject()
+        timeline = project.GetCurrentTimeline() if project else None
+    except Exception as e:
+        show_error("Giteo", f"Could not access the current Resolve project:\n{e}")
+        return False
+
+    if not project or not timeline:
+        _log("No active timeline available for auto-save.")
+        return True
+
+    timeline_name = timeline.GetName() or "untitled"
+    _log(f"Auto-saving timeline '{timeline_name}' before {reason}...")
+
+    try:
+        serialize_timeline(timeline, project, project_dir, resolve_app=resolve_var)
+        git_add(project_dir, ["timeline/", "assets/", ".giteo/", ".gitignore"])
+        commit_hash = git_commit(project_dir, f"giteo: auto-save before {reason}")
+        if commit_hash:
+            _log(f"Auto-saved current timeline ({commit_hash}).")
+        else:
+            _log("Auto-saved current timeline.")
+        return True
+    except GitError as e:
+        if "nothing to commit" in str(e):
+            _log("Timeline already matches the current branch snapshot.")
+            return True
+        show_error("Giteo", f"Auto-save failed:\n{e}")
+        return False
+    except Exception as e:
+        show_error("Giteo", f"Auto-save failed:\n{e}")
+        return False
