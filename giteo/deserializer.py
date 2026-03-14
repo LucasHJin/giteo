@@ -416,6 +416,80 @@ def _apply_audio_speed(timeline, audio_tracks: List[AudioTrack]) -> None:
             _apply_speed(clips[i], item.speed, item.id)
 
 
+def _apply_extended_video_properties(timeline, video_tracks: List[VideoTrack]) -> None:
+    """Apply extended properties: transform details, composite mode, clip enabled, etc."""
+    track_count = timeline.GetTrackCount("video")
+    for track in video_tracks:
+        if track.index > track_count:
+            continue
+        clips = timeline.GetItemListInTrack("video", track.index)
+        if not clips:
+            continue
+        for i, item in enumerate(track.items):
+            if i >= len(clips):
+                break
+            clip = clips[i]
+            t = item.transform
+
+            _set_prop = clip.SetProperty
+            try:
+                _set_prop("Pan", t.pan)
+                _set_prop("Tilt", t.tilt)
+                _set_prop("ZoomX", t.zoom_x)
+                _set_prop("ZoomY", t.zoom_y)
+                _set_prop("Opacity", t.opacity)
+            except (AttributeError, TypeError):
+                pass
+
+            for prop, val, default in [
+                ("RotationAngle", t.rotation_angle, 0.0),
+                ("AnchorPointX", t.anchor_x, 0.0),
+                ("AnchorPointY", t.anchor_y, 0.0),
+                ("Pitch", t.pitch, 0.0),
+                ("Yaw", t.yaw, 0.0),
+                ("CropLeft", t.crop_left, 0.0),
+                ("CropRight", t.crop_right, 0.0),
+                ("CropTop", t.crop_top, 0.0),
+                ("CropBottom", t.crop_bottom, 0.0),
+                ("CropSoftness", t.crop_softness, 0.0),
+                ("Distortion", t.distortion, 0.0),
+            ]:
+                if val != default:
+                    try:
+                        _set_prop(prop, val)
+                    except (AttributeError, TypeError):
+                        pass
+
+            for bool_prop, val in [
+                ("FlipX", t.flip_x),
+                ("FlipY", t.flip_y),
+                ("CropRetain", t.crop_retain),
+            ]:
+                if val:
+                    try:
+                        _set_prop(bool_prop, val)
+                    except (AttributeError, TypeError):
+                        pass
+
+            if item.composite_mode != 0:
+                try:
+                    _set_prop("CompositeMode", item.composite_mode)
+                except (AttributeError, TypeError):
+                    pass
+
+            if item.dynamic_zoom_ease != 0:
+                try:
+                    _set_prop("DynamicZoomEase", item.dynamic_zoom_ease)
+                except (AttributeError, TypeError):
+                    pass
+
+            if not item.clip_enabled:
+                try:
+                    clip.SetClipEnabled(False)
+                except (AttributeError, TypeError):
+                    pass
+
+
 def _apply_grade_from_drx(timeline, clip, drx_path: str, item_id: str) -> bool:
     """Apply a DRX grade using whichever Resolve API is actually available."""
     timeline_apply = getattr(timeline, "ApplyGradeFromDRX", None)
@@ -732,6 +806,7 @@ def deserialize_timeline(timeline, project, project_dir: str, resolve_app=None) 
 
     _apply_video_speed(new_timeline, video_tracks)
     _apply_audio_speed(new_timeline, audio_tracks)
+    _apply_extended_video_properties(new_timeline, video_tracks)
     _apply_color(new_timeline, color_grades, project_dir, resolve_app=resolve_app)
     _apply_markers(new_timeline, markers)
 

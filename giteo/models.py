@@ -4,6 +4,26 @@ from dataclasses import dataclass, field
 from typing import Dict, List, Optional
 
 
+COMPOSITE_MODE_NAMES = {
+    0: "normal", 1: "add", 2: "subtract", 3: "difference",
+    4: "multiply", 5: "screen", 6: "overlay", 7: "hard_light",
+    8: "soft_light", 9: "darken", 10: "lighten", 11: "color_dodge",
+    12: "color_burn", 13: "exclusion", 14: "hue", 15: "saturate",
+    16: "colorize", 17: "luma_mask", 18: "divide", 19: "linear_dodge",
+    20: "linear_burn", 21: "linear_light", 22: "vivid_light",
+    23: "pin_light", 24: "hard_mix", 25: "lighter_color",
+    26: "darker_color", 27: "foreground", 28: "alpha",
+    29: "inverted_alpha", 30: "lum", 31: "inverted_lum",
+}
+
+DYNAMIC_ZOOM_EASE_NAMES = {
+    0: "linear",
+    1: "ease_in",
+    2: "ease_out",
+    3: "ease_in_and_out",
+}
+
+
 @dataclass
 class Transform:
     pan: float = 0.0
@@ -11,15 +31,58 @@ class Transform:
     zoom_x: float = 1.0
     zoom_y: float = 1.0
     opacity: float = 100.0
+    rotation_angle: float = 0.0
+    anchor_x: float = 0.0
+    anchor_y: float = 0.0
+    pitch: float = 0.0
+    yaw: float = 0.0
+    flip_x: bool = False
+    flip_y: bool = False
+    crop_left: float = 0.0
+    crop_right: float = 0.0
+    crop_top: float = 0.0
+    crop_bottom: float = 0.0
+    crop_softness: float = 0.0
+    crop_retain: bool = False
+    distortion: float = 0.0
 
     def to_dict(self) -> dict:
-        return {
+        d: dict = {
             "Pan": self.pan,
             "Tilt": self.tilt,
             "ZoomX": self.zoom_x,
             "ZoomY": self.zoom_y,
             "Opacity": self.opacity,
         }
+        if self.rotation_angle != 0.0:
+            d["RotationAngle"] = self.rotation_angle
+        if self.anchor_x != 0.0:
+            d["AnchorPointX"] = self.anchor_x
+        if self.anchor_y != 0.0:
+            d["AnchorPointY"] = self.anchor_y
+        if self.pitch != 0.0:
+            d["Pitch"] = self.pitch
+        if self.yaw != 0.0:
+            d["Yaw"] = self.yaw
+        if self.flip_x:
+            d["FlipX"] = True
+        if self.flip_y:
+            d["FlipY"] = True
+        if self.crop_left != 0.0:
+            d["CropLeft"] = self.crop_left
+        if self.crop_right != 0.0:
+            d["CropRight"] = self.crop_right
+        if self.crop_top != 0.0:
+            d["CropTop"] = self.crop_top
+        if self.crop_bottom != 0.0:
+            d["CropBottom"] = self.crop_bottom
+        if self.crop_softness != 0.0:
+            d["CropSoftness"] = self.crop_softness
+        if self.crop_retain:
+            d["CropRetain"] = True
+        if self.distortion != 0.0:
+            d["Distortion"] = self.distortion
+        return d
 
     @classmethod
     def from_dict(cls, d: dict) -> "Transform":
@@ -29,6 +92,20 @@ class Transform:
             zoom_x=d.get("ZoomX", 1.0),
             zoom_y=d.get("ZoomY", 1.0),
             opacity=d.get("Opacity", 100.0),
+            rotation_angle=d.get("RotationAngle", 0.0),
+            anchor_x=d.get("AnchorPointX", 0.0),
+            anchor_y=d.get("AnchorPointY", 0.0),
+            pitch=d.get("Pitch", 0.0),
+            yaw=d.get("Yaw", 0.0),
+            flip_x=d.get("FlipX", False),
+            flip_y=d.get("FlipY", False),
+            crop_left=d.get("CropLeft", 0.0),
+            crop_right=d.get("CropRight", 0.0),
+            crop_top=d.get("CropTop", 0.0),
+            crop_bottom=d.get("CropBottom", 0.0),
+            crop_softness=d.get("CropSoftness", 0.0),
+            crop_retain=d.get("CropRetain", False),
+            distortion=d.get("Distortion", 0.0),
         )
 
 
@@ -111,6 +188,9 @@ class VideoItem:
     track_index: int
     transform: Transform = field(default_factory=Transform)
     speed: SpeedChange = field(default_factory=SpeedChange)
+    composite_mode: int = 0
+    dynamic_zoom_ease: int = 0
+    clip_enabled: bool = True
 
     def to_dict(self) -> dict:
         d = {
@@ -126,6 +206,18 @@ class VideoItem:
         }
         if self.speed.is_retimed:
             d["speed"] = self.speed.to_dict()
+        if self.composite_mode != 0:
+            d["composite_mode"] = self.composite_mode
+            d["composite_mode_name"] = COMPOSITE_MODE_NAMES.get(
+                self.composite_mode, "unknown"
+            )
+        if self.dynamic_zoom_ease != 0:
+            d["dynamic_zoom_ease"] = self.dynamic_zoom_ease
+            d["dynamic_zoom_ease_name"] = DYNAMIC_ZOOM_EASE_NAMES.get(
+                self.dynamic_zoom_ease, "unknown"
+            )
+        if not self.clip_enabled:
+            d["clip_enabled"] = False
         return d
 
     @classmethod
@@ -141,6 +233,9 @@ class VideoItem:
             track_index=d["track_index"],
             transform=Transform.from_dict(d.get("transform", {})),
             speed=SpeedChange.from_dict(d["speed"]) if "speed" in d else SpeedChange(),
+            composite_mode=d.get("composite_mode", 0),
+            dynamic_zoom_ease=d.get("dynamic_zoom_ease", 0),
+            clip_enabled=d.get("clip_enabled", True),
         )
 
 

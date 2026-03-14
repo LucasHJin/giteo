@@ -5,7 +5,12 @@ import os
 from typing import Dict, List, Optional, Tuple
 
 from .json_writer import read_json
-from .models import MOTION_EST_NAMES, RETIME_PROCESS_NAMES
+from .models import (
+    COMPOSITE_MODE_NAMES,
+    DYNAMIC_ZOOM_EASE_NAMES,
+    MOTION_EST_NAMES,
+    RETIME_PROCESS_NAMES,
+)
 
 
 def _frames_to_timecode(frames: int, fps: float = 24.0) -> str:
@@ -94,13 +99,44 @@ def diff_cuts(old: dict, new: dict, fps: float = 24.0) -> List[str]:
         # Check transform changes
         old_t = old_item.get("transform", {})
         new_t = new_item.get("transform", {})
-        for key in ["Pan", "Tilt", "ZoomX", "ZoomY", "Opacity"]:
-            old_v = old_t.get(key, 0)
-            new_v = new_t.get(key, 0)
+        transform_keys = [
+            "Pan", "Tilt", "ZoomX", "ZoomY", "Opacity",
+            "RotationAngle", "AnchorPointX", "AnchorPointY",
+            "Pitch", "Yaw", "FlipX", "FlipY",
+            "CropLeft", "CropRight", "CropTop", "CropBottom",
+            "CropSoftness", "CropRetain", "Distortion",
+        ]
+        for key in transform_keys:
+            default = False if key in ("FlipX", "FlipY", "CropRetain") else 0
+            old_v = old_t.get(key, default)
+            new_v = new_t.get(key, default)
             if old_v != new_v:
                 lines.append(
                     f"  ~ clip '{new_item['name']}': {key} {old_v} → {new_v}"
                 )
+
+        # Composite mode
+        old_cm = old_item.get("composite_mode", 0)
+        new_cm = new_item.get("composite_mode", 0)
+        if old_cm != new_cm:
+            old_name = COMPOSITE_MODE_NAMES.get(old_cm, f"mode({old_cm})")
+            new_name = COMPOSITE_MODE_NAMES.get(new_cm, f"mode({new_cm})")
+            lines.append(f"  ~ clip '{new_item['name']}': Composite {old_name} → {new_name}")
+
+        # Dynamic zoom ease
+        old_dz = old_item.get("dynamic_zoom_ease", 0)
+        new_dz = new_item.get("dynamic_zoom_ease", 0)
+        if old_dz != new_dz:
+            old_name = DYNAMIC_ZOOM_EASE_NAMES.get(old_dz, f"ease({old_dz})")
+            new_name = DYNAMIC_ZOOM_EASE_NAMES.get(new_dz, f"ease({new_dz})")
+            lines.append(f"  ~ clip '{new_item['name']}': Dynamic Zoom {old_name} → {new_name}")
+
+        # Clip enabled
+        old_en = old_item.get("clip_enabled", True)
+        new_en = new_item.get("clip_enabled", True)
+        if old_en != new_en:
+            state = "enabled" if new_en else "disabled"
+            lines.append(f"  ~ clip '{new_item['name']}': {state}")
 
         # Check speed changes
         lines.extend(_diff_speed(old_item, new_item, new_item["name"]))

@@ -39,15 +39,53 @@ def _compute_media_hash(filepath: str) -> str:
         return f"sha256:{hashlib.sha256(filepath.encode()).hexdigest()[:12]}"
 
 
+def _safe_float(clip, prop: str, default: float = 0.0) -> float:
+    try:
+        val = clip.GetProperty(prop)
+        return float(val) if val is not None else default
+    except (AttributeError, TypeError, ValueError):
+        return default
+
+
+def _safe_bool(clip, prop: str, default: bool = False) -> bool:
+    try:
+        val = clip.GetProperty(prop)
+        return bool(val) if val is not None else default
+    except (AttributeError, TypeError, ValueError):
+        return default
+
+
+def _safe_int(clip, prop: str, default: int = 0) -> int:
+    try:
+        val = clip.GetProperty(prop)
+        return int(val) if val is not None else default
+    except (AttributeError, TypeError, ValueError):
+        return default
+
+
 def _get_clip_transform(clip) -> Transform:
     """Extract transform properties from a Resolve timeline item."""
     try:
         return Transform(
-            pan=float(clip.GetProperty("Pan") or 0.0),
-            tilt=float(clip.GetProperty("Tilt") or 0.0),
-            zoom_x=float(clip.GetProperty("ZoomX") or 1.0),
-            zoom_y=float(clip.GetProperty("ZoomY") or 1.0),
-            opacity=float(clip.GetProperty("Opacity") or 100.0),
+            pan=_safe_float(clip, "Pan", 0.0),
+            tilt=_safe_float(clip, "Tilt", 0.0),
+            zoom_x=_safe_float(clip, "ZoomX", 1.0),
+            zoom_y=_safe_float(clip, "ZoomY", 1.0),
+            opacity=_safe_float(clip, "Opacity", 100.0),
+            rotation_angle=_safe_float(clip, "RotationAngle", 0.0),
+            anchor_x=_safe_float(clip, "AnchorPointX", 0.0),
+            anchor_y=_safe_float(clip, "AnchorPointY", 0.0),
+            pitch=_safe_float(clip, "Pitch", 0.0),
+            yaw=_safe_float(clip, "Yaw", 0.0),
+            flip_x=_safe_bool(clip, "FlipX", False),
+            flip_y=_safe_bool(clip, "FlipY", False),
+            crop_left=_safe_float(clip, "CropLeft", 0.0),
+            crop_right=_safe_float(clip, "CropRight", 0.0),
+            crop_top=_safe_float(clip, "CropTop", 0.0),
+            crop_bottom=_safe_float(clip, "CropBottom", 0.0),
+            crop_softness=_safe_float(clip, "CropSoftness", 0.0),
+            crop_retain=_safe_bool(clip, "CropRetain", False),
+            distortion=_safe_float(clip, "Distortion", 0.0),
         )
     except (AttributeError, TypeError):
         return Transform()
@@ -89,6 +127,15 @@ def _get_clip_speed(clip) -> SpeedChange:
         retime_process=retime_process,
         motion_estimation=motion_est,
     )
+
+
+def _get_clip_enabled(clip) -> bool:
+    """Read clip enabled state (v20+). Falls back to True for older versions."""
+    try:
+        val = clip.GetClipEnabled()
+        return bool(val) if val is not None else True
+    except (AttributeError, TypeError):
+        return True
 
 
 def _serialize_video_tracks(timeline) -> Tuple[List[VideoTrack], Dict[str, Asset]]:
@@ -140,6 +187,9 @@ def _serialize_video_tracks(timeline) -> Tuple[List[VideoTrack], Dict[str, Asset
                 track_index=track_idx,
                 transform=_get_clip_transform(clip),
                 speed=_get_clip_speed(clip),
+                composite_mode=_safe_int(clip, "CompositeMode", 0),
+                dynamic_zoom_ease=_safe_int(clip, "DynamicZoomEase", 0),
+                clip_enabled=_get_clip_enabled(clip),
             )
             items.append(video_item)
 

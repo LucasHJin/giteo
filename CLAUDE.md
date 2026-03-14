@@ -193,7 +193,11 @@ When Editor A changes `cuts.json` on `main` and Colorist B changes `color.json` 
             "Tilt": 0.0,
             "ZoomX": 1.0,
             "ZoomY": 1.0,
-            "Opacity": 100.0
+            "Opacity": 100.0,
+            "RotationAngle": 15.0,
+            "CropLeft": 50.0,
+            "CropRight": 50.0,
+            "FlipX": true
           },
           "speed": {
             "speed_percent": 50.0,
@@ -201,7 +205,9 @@ When Editor A changes `cuts.json` on `main` and Colorist B changes `color.json` 
             "retime_process_name": "optical_flow",
             "motion_estimation": 4,
             "motion_estimation_name": "enhanced_better"
-          }
+          },
+          "composite_mode": 5,
+          "composite_mode_name": "screen"
         }
       ]
     }
@@ -471,6 +477,26 @@ Return the resolved JSON for each domain file.
 ## Known Resolve API Limitations
 
 Reference: https://deric.github.io/DaVinciResolve-API-Docs/
+
+### Extended Timeline Item Properties (v20.3+)
+
+Beyond the original Pan/Tilt/Zoom/Opacity, the API exposes additional properties via `GetProperty`/`SetProperty`:
+
+| Property | Type | Range | Notes |
+|----------|------|-------|-------|
+| `RotationAngle` | float | -360.0 to 360.0 | Clip rotation |
+| `AnchorPointX/Y` | float | -4x to 4x dimensions | Transform anchor |
+| `Pitch` / `Yaw` | float | -1.5 to 1.5 | 3D perspective |
+| `FlipX` / `FlipY` | bool | — | Horizontal/vertical flip |
+| `CropLeft/Right/Top/Bottom` | float | 0 to dimension | Framing crop |
+| `CropSoftness` | float | -100.0 to 100.0 | Crop edge softness |
+| `CropRetain` | bool | — | Retain image position |
+| `CompositeMode` | int | 0-31 | Blending mode (0=normal) |
+| `DynamicZoomEase` | int | 0-3 | Zoom animation easing |
+| `Distortion` | float | -1.0 to 1.0 | Lens distortion |
+| `GetClipEnabled()` / `SetClipEnabled(bool)` | bool | — | Enable/disable clip (v20+) |
+
+All of these return **static values only** — no keyframe data. They are serialized in `cuts.json` (transform block for spatial properties, top-level for composite/zoom/enabled).
 
 ### Speed/Retime — Constant Speed Only
 
