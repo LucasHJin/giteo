@@ -127,22 +127,32 @@ def _check_audio_video_sync(cuts: dict, audio: dict) -> List[ValidationIssue]:
     """Check for audio/video sync issues — linked clips should have matching boundaries."""
     issues = []
 
-    # Build a map of video items by media_ref
-    video_by_ref: Dict[str, dict] = {}
+    # Build a list of video items by media_ref (multiple clips can share
+    # the same ref when a clip is split in the NLE)
+    video_by_ref: Dict[str, List[dict]] = {}
     for track in cuts.get("video_tracks", []):
         for item in track.get("items", []):
             ref = item.get("media_ref")
             if ref:
-                video_by_ref[ref] = item
+                video_by_ref.setdefault(ref, []).append(item)
 
-    # Check audio items against their video counterparts
+    # Check audio items against their video counterparts.
+    # Match by index within each media_ref group (first audio clip with
+    # first video clip of the same media, etc.)
+    audio_by_ref: Dict[str, List[dict]] = {}
     for track in audio.get("audio_tracks", []):
         for audio_item in track.get("items", []):
             ref = audio_item.get("media_ref")
-            if not ref or ref not in video_by_ref:
-                continue
+            if ref:
+                audio_by_ref.setdefault(ref, []).append(audio_item)
 
-            video_item = video_by_ref[ref]
+    for ref, audio_items in audio_by_ref.items():
+        video_items = video_by_ref.get(ref, [])
+        for i, audio_item in enumerate(audio_items):
+            if i >= len(video_items):
+                break
+
+            video_item = video_items[i]
             v_start = video_item.get("record_start_frame", 0)
             v_end = video_item.get("record_end_frame", 0)
             a_start = audio_item.get("start_frame", 0)
@@ -242,20 +252,27 @@ def _check_speed_sync(cuts: dict, audio: dict) -> List[ValidationIssue]:
     update the corresponding audio clip, they'll be out of sync.
     """
     issues = []
-    video_by_ref: Dict[str, dict] = {}
+    video_by_ref: Dict[str, List[dict]] = {}
     for track in cuts.get("video_tracks", []):
         for item in track.get("items", []):
             ref = item.get("media_ref")
             if ref:
-                video_by_ref[ref] = item
+                video_by_ref.setdefault(ref, []).append(item)
 
+    audio_by_ref: Dict[str, List[dict]] = {}
     for track in audio.get("audio_tracks", []):
         for audio_item in track.get("items", []):
             ref = audio_item.get("media_ref")
-            if not ref or ref not in video_by_ref:
-                continue
+            if ref:
+                audio_by_ref.setdefault(ref, []).append(audio_item)
 
-            video_item = video_by_ref[ref]
+    for ref, audio_items in audio_by_ref.items():
+        video_items = video_by_ref.get(ref, [])
+        for i, audio_item in enumerate(audio_items):
+            if i >= len(video_items):
+                break
+
+            video_item = video_items[i]
             v_speed = video_item.get("speed", {}).get("speed_percent", 100.0)
             a_speed = audio_item.get("speed", {}).get("speed_percent", 100.0)
 

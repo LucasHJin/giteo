@@ -190,17 +190,49 @@ def _create_fresh_timeline(project, media_pool, old_timeline):
     return new_timeline, old_name
 
 
+def _reimport_media(media_pool, manifest: dict, media_ref: str):
+    """Re-import a media file to get a distinct MediaPoolItem.
+
+    When multiple clips on a timeline come from the same source file (e.g. a
+    clip was split), both CreateTimelineFromClips and AppendToTimeline silently
+    deduplicate entries that share the same mediaPoolItem. Re-importing the
+    file creates a new pool item that Resolve treats as a separate clip.
+    """
+    asset_info = manifest.get("assets", {}).get(media_ref)
+    if not asset_info:
+        return None
+    original_path = asset_info.get("original_path", "")
+    if not original_path or not os.path.exists(original_path):
+        return None
+
+    imported = media_pool.ImportMedia([original_path])
+    if imported and len(imported) > 0:
+        return imported[0]
+    return None
+
+
 def _collect_video_clip_infos(media_pool, video_tracks: List[VideoTrack],
                               manifest: dict) -> List[dict]:
     """Collect clip info dicts for CreateTimelineFromClips.
 
-    Uses only the documented clip info keys (mediaPoolItem, startFrame,
-    endFrame) to avoid undefined behavior from undocumented parameters.
+    When multiple clips share the same source file (split clips), each
+    additional clip gets a freshly-imported mediaPoolItem. Without this,
+    Resolve silently deduplicates and only places the first clip.
     """
     clip_infos = []
+    seen_refs = set()
     for track in video_tracks:
         for item in track.items:
-            pool_item = _find_media_pool_item(media_pool, manifest, item.media_ref)
+            if item.media_ref in seen_refs:
+                # Split clip — re-import to get a unique pool item
+                pool_item = _reimport_media(media_pool, manifest, item.media_ref)
+                if not pool_item:
+                    # Fallback: try the shared item (may be deduped)
+                    pool_item = _find_media_pool_item(media_pool, manifest, item.media_ref)
+            else:
+                pool_item = _find_media_pool_item(media_pool, manifest, item.media_ref)
+                seen_refs.add(item.media_ref)
+
             if not pool_item:
                 print(f"  Warning: Could not find media for '{item.name}' ({item.media_ref})")
                 continue
@@ -214,46 +246,54 @@ def _collect_video_clip_infos(media_pool, video_tracks: List[VideoTrack],
 
 def _create_timeline_with_clips(media_pool, clip_infos: List[dict],
                                 timestamp: int):
-    """Create a new timeline, optionally pre-populated with video clips.
+    """Create a new timeline pre-populated with the FIRST video clip.
 
-    Uses CreateTimelineFromClips when clips are available — this is an atomic
+    Uses CreateTimelineFromClips with only the first clip — this is an atomic
     operation that avoids the SetCurrentTimeline race condition that caused
     clip duplication with the old CreateEmptyTimeline + AppendToTimeline flow.
 
-    Falls back to CreateEmptyTimeline if CreateTimelineFromClips fails or
-    there are no clips to add.
+    Remaining clips (index 1+) must be added afterwards via AppendToTimeline
+    by the caller, because CreateTimelineFromClips silently drops all but the
+    first clip when multiple clip_infos are passed.
+
+    Returns (new_timeline, created_with_first_clip, remaining_clip_infos).
     """
     temp_name = f"giteo_temp_{timestamp}"
     new_timeline = None
-    created_with_clips = False
+    created_with_first = False
+    first_only = [clip_infos[0]] if clip_infos else []
+    remaining = clip_infos[1:] if len(clip_infos) > 1 else []
 
-    if clip_infos:
+    if first_only:
         try:
-            new_timeline = media_pool.CreateTimelineFromClips(temp_name, clip_infos)
+            new_timeline = media_pool.CreateTimelineFromClips(temp_name, first_only)
             if new_timeline:
-                created_with_clips = True
+                created_with_first = True
         except (AttributeError, TypeError):
             pass
 
     if not new_timeline:
         new_timeline = media_pool.CreateEmptyTimeline(temp_name)
+        remaining = clip_infos  # All clips need AppendToTimeline
 
     if not new_timeline:
         for i in range(1, 5):
             alt_name = f"giteo_temp_{timestamp}_{i}"
-            if clip_infos:
+            if first_only:
                 try:
-                    new_timeline = media_pool.CreateTimelineFromClips(alt_name, clip_infos)
+                    new_timeline = media_pool.CreateTimelineFromClips(alt_name, first_only)
                     if new_timeline:
-                        created_with_clips = True
+                        created_with_first = True
+                        remaining = clip_infos[1:]
                 except (AttributeError, TypeError):
                     pass
             if not new_timeline:
                 new_timeline = media_pool.CreateEmptyTimeline(alt_name)
+                remaining = clip_infos
             if new_timeline:
                 break
 
-    return new_timeline, created_with_clips
+    return new_timeline, created_with_first, remaining
 
 
 def _clear_markers(timeline) -> None:
@@ -272,23 +312,32 @@ def _apply_video_tracks(timeline, media_pool, video_tracks: List[VideoTrack], ma
 
     This is the FALLBACK path used only when CreateTimelineFromClips fails.
     The caller must ensure the timeline is confirmed as current before calling.
+
+    All clips for a track are batched into a SINGLE AppendToTimeline call.
+    Calling AppendToTimeline once-per-clip with the same mediaPoolItem causes
+    Resolve to silently ignore the second call (deduplication). Batching all
+    clips into one call tells Resolve to place multiple subclips from the same
+    source media sequentially.
     """
     for track in video_tracks:
         while timeline.GetTrackCount("video") < track.index:
             timeline.AddTrack("video")
 
+        clip_infos = []
         for item in track.items:
             pool_item = _find_media_pool_item(media_pool, manifest, item.media_ref)
             if not pool_item:
                 print(f"  Warning: Could not find media for '{item.name}' ({item.media_ref})")
                 continue
 
-            clip_info = {
+            clip_infos.append({
                 "mediaPoolItem": pool_item,
                 "startFrame": item.source_start_frame,
                 "endFrame": item.source_end_frame,
-            }
-            media_pool.AppendToTimeline([clip_info])
+            })
+
+        if clip_infos:
+            media_pool.AppendToTimeline(clip_infos)
 
 
 def _apply_audio_properties_only(timeline, audio_tracks: List[AudioTrack]) -> None:
@@ -755,45 +804,48 @@ def deserialize_timeline(timeline, project, project_dir: str, resolve_app=None) 
     # Phase 1: Collect video clip infos for atomic timeline creation
     video_clip_infos = _collect_video_clip_infos(media_pool, video_tracks, manifest)
 
-    # Phase 2: Create new timeline atomically with video clips.
-    # CreateTimelineFromClips bypasses the async SetCurrentTimeline race
-    # that caused clip duplication with the old approach.
-    new_timeline, created_with_clips = _create_timeline_with_clips(
-        media_pool, video_clip_infos, timestamp)
+    # Phase 2: Create new timeline with FIRST video clip only.
+    # CreateTimelineFromClips only reliably handles one clip per call.
+    # Remaining clips are added via AppendToTimeline after the switch.
+    new_timeline, created_with_first, remaining_clip_infos = \
+        _create_timeline_with_clips(media_pool, video_clip_infos, timestamp)
 
     if not new_timeline:
         print("  ERROR: Could not create new timeline. Aborting to prevent duplication.")
         print("  Please manually create a new empty timeline and run Switch Branch again.")
         return
 
-    # Phase 3: Set new timeline as current (needed for audio AppendToTimeline)
+    # Phase 3: Set new timeline as current (needed for AppendToTimeline)
     project.SetCurrentTimeline(new_timeline)
     switched = _wait_for_current_timeline(project, new_timeline)
 
-    # Phase 4: Apply metadata, video fallback, audio, color, markers
+    # Phase 4: Apply metadata, remaining video clips, audio, color, markers
     _apply_metadata(new_timeline, project, metadata)
 
-    # If CreateTimelineFromClips didn't work, fall back to AppendToTimeline
-    # but ONLY if we confirmed the timeline switch
-    if video_clip_infos and not created_with_clips:
-        if switched:
-            _apply_video_tracks(new_timeline, media_pool, video_tracks, manifest)
-        else:
-            print("  ERROR: Could not confirm timeline switch. "
-                  "Skipping video clips to prevent duplication.")
+    # Add remaining video clips via AppendToTimeline (one at a time).
+    # CreateTimelineFromClips only handles one clip reliably; the rest
+    # are appended individually with unique re-imported pool items.
+    if remaining_clip_infos and switched:
+        for clip_info in remaining_clip_infos:
+            media_pool.AppendToTimeline([clip_info])
+    elif remaining_clip_infos:
+        print("  ERROR: Could not confirm timeline switch. "
+              "Skipping remaining video clips to prevent duplication.")
 
-    # Audio handling depends on how video clips were added.
-    # When CreateTimelineFromClips adds a video+audio file, Resolve auto-creates
-    # linked audio clips. Calling AppendToTimeline again with the SAME media
-    # creates duplicate video clips. So:
+    # Audio handling: When video+audio media is added (via CreateTimelineFromClips
+    # OR AppendToTimeline), Resolve auto-creates linked audio clips. Calling
+    # AppendToTimeline again with the SAME media creates duplicate video clips.
+    # So in BOTH paths:
     #   - Apply volume/pan to linked audio that already exists
     #   - Only AppendToTimeline for standalone audio (media not in video tracks)
+    video_refs = {
+        item.media_ref for track in video_tracks for item in track.items
+    }
     if audio_tracks:
-        if created_with_clips:
+        if video_clip_infos:
+            # Video clips were added (either atomically or via fallback) —
+            # linked audio already exists for shared media refs
             _apply_audio_properties_only(new_timeline, audio_tracks)
-            video_refs = {
-                item.media_ref for track in video_tracks for item in track.items
-            }
             if switched:
                 _apply_audio_tracks(
                     new_timeline, media_pool, audio_tracks, manifest,

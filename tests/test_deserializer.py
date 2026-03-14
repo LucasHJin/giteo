@@ -69,15 +69,16 @@ def test_create_fresh_timeline_no_rename_before_population():
 
 
 def test_create_timeline_with_clips_atomic():
-    """_create_timeline_with_clips should use CreateTimelineFromClips."""
+    """_create_timeline_with_clips should use CreateTimelineFromClips for first clip."""
     media_pool = MockMediaPool()
     pool_item = MockMediaPoolItem(filepath="/Volumes/Media/test.mov", frames=1000)
     clip_infos = [{"mediaPoolItem": pool_item, "startFrame": 0, "endFrame": 100}]
 
-    new_tl, created_with_clips = _create_timeline_with_clips(media_pool, clip_infos, 12345)
+    new_tl, created_with_first, remaining = _create_timeline_with_clips(media_pool, clip_infos, 12345)
 
     assert new_tl is not None
-    assert created_with_clips is True
+    assert created_with_first is True
+    assert remaining == []
     assert new_tl.GetName().startswith("giteo_temp_")
     assert _timeline_has_clips(new_tl)
 
@@ -86,10 +87,11 @@ def test_create_timeline_with_clips_empty():
     """_create_timeline_with_clips with no clips should create empty timeline."""
     media_pool = MockMediaPool()
 
-    new_tl, created_with_clips = _create_timeline_with_clips(media_pool, [], 12345)
+    new_tl, created_with_first, remaining = _create_timeline_with_clips(media_pool, [], 12345)
 
     assert new_tl is not None
-    assert created_with_clips is False
+    assert created_with_first is False
+    assert remaining == []
     assert not _timeline_has_clips(new_tl)
 
 
@@ -100,10 +102,11 @@ def test_create_timeline_with_clips_fallback():
     pool_item = MockMediaPoolItem(filepath="/Volumes/Media/test.mov", frames=1000)
     clip_infos = [{"mediaPoolItem": pool_item, "startFrame": 0, "endFrame": 100}]
 
-    new_tl, created_with_clips = _create_timeline_with_clips(media_pool, clip_infos, 12345)
+    new_tl, created_with_first, remaining = _create_timeline_with_clips(media_pool, clip_infos, 12345)
 
     assert new_tl is not None
-    assert created_with_clips is False
+    assert created_with_first is False
+    assert remaining == clip_infos  # All clips need AppendToTimeline
     assert not _timeline_has_clips(new_tl)
 
 
