@@ -1105,7 +1105,8 @@ class GiteoPanel(QMainWindow):
         self._log_section = CollapsibleSection("LOG")
         self._log_text = QTextEdit()
         self._log_text.setReadOnly(True)
-        self._log_text.setMaximumHeight(120)
+        self._log_text.setFixedHeight(120)
+        self._log_text.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         self._log_text.setStyleSheet(f"""
             QTextEdit {{
                 background-color: {BG_INPUT};
