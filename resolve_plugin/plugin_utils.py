@@ -1,10 +1,10 @@
 """Shared utilities for DaVinci Resolve plugin scripts.
 
-Provides tkinter-based dialogs (Resolve's console doesn't support stdin)
-and project directory discovery.
+Provides dialogs (PySide6 preferred, tkinter fallback) and project directory
+discovery.
 
-IMPORTANT: Resolve runs scripts in its own Python environment. Tkinter
-dialogs may or may not work depending on the Resolve version and OS.
+IMPORTANT: Resolve runs scripts in its own Python environment. Dialogs
+may or may not work depending on the Resolve version and OS.
 All dialogs have print()-based fallbacks so scripts never silently fail.
 """
 
@@ -28,13 +28,22 @@ def _log(msg):
     print(f"[giteo] {msg}")
 
 
+def _has_pyside6():
+    """Check if PySide6 is available."""
+    try:
+        import PySide6
+        return True
+    except ImportError:
+        return False
+
+
 def get_project_dir():
     """Find the giteo project directory.
 
     Checks in order:
       1. GITEO_PROJECT_DIR environment variable
       2. ~/.giteo/last_project saved path
-      3. Tkinter directory picker dialog
+      3. Directory picker dialog (PySide6 or tkinter)
     """
     # 1. Env var
     env_dir = os.environ.get("GITEO_PROJECT_DIR")
@@ -49,35 +58,54 @@ def get_project_dir():
         if last_dir and os.path.isdir(os.path.join(last_dir, ".giteo")):
             return last_dir
 
-    # 3. Ask with tkinter
-    try:
-        import tkinter as tk
-        from tkinter import filedialog
+    # 3. Ask with dialog
+    selected = None
 
-        root = tk.Tk()
-        root.withdraw()
-        selected = filedialog.askdirectory(title="Select Giteo Project Directory")
-        root.destroy()
+    if _has_pyside6():
+        try:
+            from PySide6.QtWidgets import QApplication, QFileDialog
+            app = QApplication.instance() or QApplication(sys.argv)
+            selected = QFileDialog.getExistingDirectory(None, "Select Giteo Project Directory")
+        except Exception as e:
+            _log(f"PySide6 dialog failed: {e}")
 
-        if not selected:
-            return None
-        if not os.path.isdir(os.path.join(selected, ".giteo")):
-            show_error(
-                "Not a giteo project",
-                f"'{selected}' has no .giteo folder.\nRun 'giteo init' from terminal first.",
-            )
-            return None
-        _save_last_project(selected)
-        return selected
-    except Exception as e:
-        _log(f"Dialog failed: {e}")
+    if not selected:
+        try:
+            import tkinter as tk
+            from tkinter import filedialog
+
+            root = tk.Tk()
+            root.withdraw()
+            selected = filedialog.askdirectory(title="Select Giteo Project Directory")
+            root.destroy()
+        except Exception as e:
+            _log(f"Tkinter dialog failed: {e}")
+
+    if not selected:
         _log("Set GITEO_PROJECT_DIR env var or create ~/.giteo/last_project with the path.")
         return None
+
+    if not os.path.isdir(os.path.join(selected, ".giteo")):
+        show_error(
+            "Not a giteo project",
+            f"'{selected}' has no .giteo folder.\nRun 'giteo init' from terminal first.",
+        )
+        return None
+    _save_last_project(selected)
+    return selected
 
 
 def show_message(title, message):
     """Show an info dialog. Falls back to print()."""
     _log(message)
+    if _has_pyside6():
+        try:
+            from PySide6.QtWidgets import QApplication, QMessageBox
+            app = QApplication.instance() or QApplication(sys.argv)
+            QMessageBox.information(None, title, message)
+            return
+        except Exception:
+            pass
     try:
         import tkinter as tk
         from tkinter import messagebox
@@ -93,6 +121,14 @@ def show_message(title, message):
 def show_error(title, message):
     """Show an error dialog. Falls back to print()."""
     _log(f"ERROR: {message}")
+    if _has_pyside6():
+        try:
+            from PySide6.QtWidgets import QApplication, QMessageBox
+            app = QApplication.instance() or QApplication(sys.argv)
+            QMessageBox.critical(None, title, message)
+            return
+        except Exception:
+            pass
     try:
         import tkinter as tk
         from tkinter import messagebox
@@ -107,6 +143,17 @@ def show_error(title, message):
 
 def ask_string(title, prompt, initial=""):
     """Ask user for a text string via dialog. Returns initial value on failure."""
+    if _has_pyside6():
+        try:
+            from PySide6.QtWidgets import QApplication, QInputDialog
+            app = QApplication.instance() or QApplication(sys.argv)
+            text, ok = QInputDialog.getText(None, title, prompt, text=initial)
+            if ok:
+                return text
+            return None
+        except Exception as e:
+            _log(f"PySide6 dialog failed ({e}), trying tkinter...")
+
     try:
         import tkinter as tk
         from tkinter import simpledialog
@@ -124,9 +171,21 @@ def ask_string(title, prompt, initial=""):
 
 
 def ask_choice(title, prompt, choices):
-    """Ask user to pick from a list via a Listbox dialog. Returns the selected string."""
+    """Ask user to pick from a list via dialog. Returns the selected string."""
     if not choices:
         return None
+
+    if _has_pyside6():
+        try:
+            from PySide6.QtWidgets import QApplication, QInputDialog
+            app = QApplication.instance() or QApplication(sys.argv)
+            item, ok = QInputDialog.getItem(None, title, prompt, choices, 0, False)
+            if ok and item:
+                return item
+            return None
+        except Exception as e:
+            _log(f"PySide6 dialog failed ({e}), trying tkinter...")
+
     try:
         import tkinter as tk
 

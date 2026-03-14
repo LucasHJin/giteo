@@ -10,6 +10,9 @@ setup(
         "google-generativeai",
         "rich",
     ],
+    extras_require={
+        "qt": ["PySide6"],
+    },
     entry_points={
         "console_scripts": [
             "giteo=giteo.cli:main",

@@ -385,24 +385,12 @@ RESOLVE_SCRIPTS_DIR = os.path.expanduser(
 )
 
 RESOLVE_SCRIPT_NAMES = [
-    "giteo_commit.py",
-    "giteo_branch.py",
-    "giteo_merge.py",
-    "giteo_restore.py",
-    "giteo_status.py",
-    "giteo_push.py",
-    "giteo_pull.py",
+    "giteo_panel_launcher.py",
 ]
 
 
 _RESOLVE_MENU_NAMES = {
-    "giteo_commit.py": "Giteo - Save Version.py",
-    "giteo_branch.py": "Giteo - New Branch.py",
-    "giteo_merge.py": "Giteo - Merge Branch.py",
-    "giteo_restore.py": "Giteo - Switch Branch.py",
-    "giteo_status.py": "Giteo - Status.py",
-    "giteo_push.py": "Giteo - Push.py",
-    "giteo_pull.py": "Giteo - Pull & Restore.py",
+    "giteo_panel_launcher.py": "Giteo.py",
 }
 
 
@@ -452,9 +440,20 @@ def cmd_install_resolve(args):
 
 def cmd_uninstall_resolve(args):
     """Remove Resolve plugin symlinks."""
+    # Include legacy script names so old installs get cleaned up
+    _ALL_GITEO_NAMES = [
+        "Giteo.py",
+        "Giteo - Panel.py",
+        "Giteo - Save Version.py",
+        "Giteo - New Branch.py",
+        "Giteo - Merge Branch.py",
+        "Giteo - Switch Branch.py",
+        "Giteo - Status.py",
+        "Giteo - Push.py",
+        "Giteo - Pull & Restore.py",
+    ]
     removed = 0
-    for script_name in RESOLVE_SCRIPT_NAMES:
-        menu_name = _resolve_menu_name(script_name)
+    for menu_name in _ALL_GITEO_NAMES:
         dest = os.path.join(RESOLVE_SCRIPTS_DIR, menu_name)
         if os.path.islink(dest) or os.path.exists(dest):
             os.remove(dest)
