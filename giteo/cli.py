@@ -3,6 +3,7 @@
 import argparse
 import json
 import os
+import shutil
 import sys
 
 from . import __version__
@@ -380,9 +381,19 @@ def cmd_validate(args):
         print("  Validation passed — no issues found.")
 
 
-RESOLVE_SCRIPTS_DIR = os.path.expanduser(
-    "~/Library/Application Support/Blackmagic Design/DaVinci Resolve/Fusion/Scripts/Edit"
-)
+if sys.platform == "win32":
+    RESOLVE_SCRIPTS_DIR = os.path.join(
+        os.environ.get("APPDATA", ""),
+        "Blackmagic Design",
+        "DaVinci Resolve",
+        "Fusion",
+        "Scripts",
+        "Edit",
+    )
+else:
+    RESOLVE_SCRIPTS_DIR = os.path.expanduser(
+        "~/Library/Application Support/Blackmagic Design/DaVinci Resolve/Fusion/Scripts/Edit"
+    )
 
 RESOLVE_SCRIPT_NAMES = [
     "giteo_panel.py",
@@ -423,7 +434,10 @@ def cmd_install_resolve(args):
         if os.path.islink(dest) or os.path.exists(dest):
             os.remove(dest)
 
-        os.symlink(source, dest)
+        if sys.platform == "win32":
+            shutil.copy2(source, dest)
+        else:
+            os.symlink(source, dest)
         print(f"  Linked: {menu_name} → {source}")
 
     # Save the repo root path so Resolve scripts can find the giteo package
