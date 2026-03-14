@@ -15,6 +15,7 @@ from .models import (
     AudioItem,
     AudioTrack,
     ColorGrade,
+    ColorNodeGrade,
     Marker,
     Timeline,
     TimelineMetadata,
@@ -161,12 +162,56 @@ def _frame_to_tc(frame: int, start_frame: int, start_tc: str, fps: float) -> str
     return f"{out_hh:02d}:{out_mm:02d}:{out_ss:02d}:{out_ff:02d}"
 
 
-def _read_clip_grade_info(clip) -> Tuple[int, List[dict], str]:
-    """Read structural grade info that the Resolve API exposes."""
+def _read_color_adjustments(clip) -> dict:
+    """Read clip-level color adjustments via GetProperty().
+
+    The Resolve scripting API is write-only for per-node color data
+    (SetCDL exists but GetCDL does not, SetLUT exists but GetLUT does not).
+
+    However, clip-level properties like Contrast and Saturation may be
+    readable via GetProperty() — this is not officially documented but
+    works in some Resolve versions.
+    """
+    adjustments = {}
+
+    props = {
+        "contrast": "Contrast",
+        "saturation": "Saturation",
+        "hue": "Hue",
+        "pivot": "Pivot",
+        "color_boost": "ColorBoost",
+    }
+
+    for adj_key, prop_name in props.items():
+        try:
+            val = clip.GetProperty(prop_name)
+            if val is not None:
+                fval = float(val)
+                adjustments[adj_key] = round(fval, 6)
+        except (AttributeError, TypeError, ValueError):
+            continue
+
+    return adjustments
+
+
+def _read_clip_grade_info(clip) -> Tuple[int, List[ColorNodeGrade], str]:
+    """Read color grade info from a Resolve clip.
+
+    The Resolve scripting API is largely write-only for color:
+    - SetCDL() exists but GetCDL() does NOT
+    - SetLUT() exists but GetLUT() does NOT
+    - GetNumNodes() / GetNodeLabel() are undocumented but may work
+
+    What we CAN read:
+    1. Node count & labels (undocumented, try with fallback)
+    2. Clip-level properties like Contrast/Saturation via GetProperty()
+    3. Full grade via DRX still export (handled separately in _export_grade_stills)
+    """
     num_nodes = 1
-    nodes = []
+    nodes: List[ColorNodeGrade] = []
     version_name = ""
 
+    # GetNumNodes() is undocumented but works in many Resolve versions
     try:
         n = clip.GetNumNodes()
         if n:
@@ -174,18 +219,34 @@ def _read_clip_grade_info(clip) -> Tuple[int, List[dict], str]:
     except (AttributeError, TypeError):
         pass
 
+    # Read clip-level color adjustments via GetProperty()
+    clip_adjustments = _read_color_adjustments(clip)
+
     for node_idx in range(1, num_nodes + 1):
         label = ""
         lut = ""
+        # GetNodeLabel() is undocumented but may work
         try:
             label = clip.GetNodeLabel(node_idx) or ""
         except (AttributeError, TypeError):
             pass
+        # GetLUT() is NOT in the official API — try anyway
         try:
             lut = clip.GetLUT(node_idx) or ""
         except (AttributeError, TypeError):
             pass
-        nodes.append({"index": node_idx, "label": label, "lut": lut})
+
+        node = ColorNodeGrade(index=node_idx, label=label, lut=lut)
+
+        # Clip-level adjustments go on the first node
+        if node_idx == 1 and clip_adjustments:
+            node.contrast = clip_adjustments.get("contrast")
+            node.saturation = clip_adjustments.get("saturation")
+            node.pivot = clip_adjustments.get("pivot")
+            node.hue = clip_adjustments.get("hue")
+            node.color_boost = clip_adjustments.get("color_boost")
+
+        nodes.append(node)
 
     try:
         ver = clip.GetCurrentVersion()
@@ -309,10 +370,11 @@ def _serialize_color(timeline, video_tracks: List[VideoTrack],
                      resolve_app=None) -> Dict[str, ColorGrade]:
     """Extract color grading data per clip.
 
-    Resolve's API has SetCDL() but no GetCDL(), so we can't read actual
-    color wheel values. Instead we:
-      1. Read structural info (node count, labels, LUT paths, version name)
-      2. Export full grades as DRX stills (binary, git-tracked)
+    The Resolve API is mostly write-only for color, so we capture what we can:
+      1. Clip-level adjustments (contrast, saturation, hue) via GetProperty()
+      2. Node structure (count, labels) via undocumented but working APIs
+      3. DRX grade stills for full-fidelity binary backup (the only way to
+         capture complete grades including CDL, curves, qualifiers, etc.)
     """
     grades = {}
     track_count = timeline.GetTrackCount("video")

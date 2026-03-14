@@ -104,15 +104,88 @@ def diff_cuts(old: dict, new: dict, fps: float = 24.0) -> List[str]:
     return lines
 
 
+def _format_rgb(vals: list) -> str:
+    """Format RGB list as readable string."""
+    if not vals or len(vals) != 3:
+        return str(vals)
+    return f"R:{vals[0]:.3f} G:{vals[1]:.3f} B:{vals[2]:.3f}"
+
+
+def _format_wheel(wheel: dict) -> str:
+    """Format a color wheel dict as readable string."""
+    if not wheel:
+        return str(wheel)
+    parts = []
+    for ch in ["r", "g", "b", "y"]:
+        if ch in wheel:
+            label = {"r": "R", "g": "G", "b": "B", "y": "Y"}[ch]
+            parts.append(f"{label}:{wheel[ch]:.3f}")
+    return " ".join(parts)
+
+
+def _diff_node_values(old_node: dict, new_node: dict, item_id: str, node_idx: int) -> List[str]:
+    """Diff color values within a single node."""
+    lines = []
+    prefix = f"  ~ clip '{item_id}' node {node_idx}"
+
+    # CDL values
+    for key, label in [("slope", "Slope"), ("offset", "Offset"), ("power", "Power")]:
+        old_v = old_node.get(key)
+        new_v = new_node.get(key)
+        if old_v != new_v:
+            old_s = _format_rgb(old_v) if old_v else "default"
+            new_s = _format_rgb(new_v) if new_v else "default"
+            lines.append(f"{prefix}: {label} {old_s} → {new_s}")
+
+    # Scalar values
+    for key, label in [("saturation", "Saturation"), ("contrast", "Contrast"),
+                        ("pivot", "Pivot"), ("hue", "Hue"), ("color_boost", "Color Boost")]:
+        old_v = old_node.get(key)
+        new_v = new_node.get(key)
+        if old_v != new_v and (old_v is not None or new_v is not None):
+            old_s = f"{old_v:.3f}" if old_v is not None else "default"
+            new_s = f"{new_v:.3f}" if new_v is not None else "default"
+            lines.append(f"{prefix}: {label} {old_s} → {new_s}")
+
+    # Color wheels
+    for key, label in [("lift", "Lift"), ("gamma", "Gamma"),
+                        ("gain", "Gain"), ("color_offset", "Offset")]:
+        old_v = old_node.get(key)
+        new_v = new_node.get(key)
+        if old_v != new_v and (old_v is not None or new_v is not None):
+            old_s = _format_wheel(old_v) if old_v else "default"
+            new_s = _format_wheel(new_v) if new_v else "default"
+            lines.append(f"{prefix}: {label} {old_s} → {new_s}")
+
+    # LUT changes
+    old_lut = old_node.get("lut", "")
+    new_lut = new_node.get("lut", "")
+    if old_lut != new_lut:
+        lines.append(f"{prefix}: LUT '{old_lut or 'none'}' → '{new_lut or 'none'}'")
+
+    return lines
+
+
 def diff_color(old: dict, new: dict) -> List[str]:
     """Diff color.json and return human-readable lines."""
     lines = []
     old_grades = old.get("grades", {})
     new_grades = new.get("grades", {})
 
-    for item_id in new_grades:
+    for item_id in sorted(new_grades):
         if item_id not in old_grades:
             lines.append(f"  + Added color grade for clip '{item_id}'")
+            # Show what was added
+            new_g = new_grades[item_id]
+            for node in new_g.get("nodes", []):
+                for key, label in [("slope", "Slope"), ("saturation", "Saturation"),
+                                    ("contrast", "Contrast"), ("hue", "Hue")]:
+                    val = node.get(key)
+                    if val is not None:
+                        if isinstance(val, list):
+                            lines.append(f"    {label}: {_format_rgb(val)}")
+                        else:
+                            lines.append(f"    {label}: {val:.3f}")
             continue
 
         old_g = old_grades[item_id]
@@ -126,17 +199,20 @@ def diff_color(old: dict, new: dict) -> List[str]:
 
         old_nodes = old_g.get("nodes", [])
         new_nodes = new_g.get("nodes", [])
-        if old_nodes != new_nodes:
-            old_luts = [n.get("lut", "") for n in old_nodes if n.get("lut")]
-            new_luts = [n.get("lut", "") for n in new_nodes if n.get("lut")]
-            if old_luts != new_luts:
-                lines.append(f"  ~ clip '{item_id}': LUTs changed")
-            elif len(old_nodes) != len(new_nodes):
-                lines.append(f"  ~ clip '{item_id}': node count {len(old_nodes)} → {len(new_nodes)}")
-            else:
-                lines.append(f"  ~ clip '{item_id}': nodes modified")
 
-    for item_id in old_grades:
+        # Diff nodes pairwise
+        max_nodes = max(len(old_nodes), len(new_nodes))
+        for idx in range(max_nodes):
+            if idx >= len(old_nodes):
+                lines.append(f"  + clip '{item_id}': added node {idx + 1}")
+                continue
+            if idx >= len(new_nodes):
+                lines.append(f"  - clip '{item_id}': removed node {idx + 1}")
+                continue
+            node_lines = _diff_node_values(old_nodes[idx], new_nodes[idx], item_id, idx + 1)
+            lines.extend(node_lines)
+
+    for item_id in sorted(old_grades):
         if item_id not in new_grades:
             lines.append(f"  - Removed color grade for clip '{item_id}'")
 

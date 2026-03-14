@@ -4,6 +4,8 @@ Mimics the Resolve Python API so serializer/deserializer can be tested
 without a running Resolve instance.
 """
 
+import os
+
 
 class MockMediaPoolItem:
     def __init__(self, filepath="", frames=0, codec="ProRes 422", resolution="1920x1080"):
@@ -19,7 +21,14 @@ class MockMediaPoolItem:
 
 
 class MockTimelineItem:
-    """Mock a clip on the timeline."""
+    """Mock a clip on the timeline.
+
+    Mimics the color-related API surface of Resolve's TimelineItem:
+    - GetProperty/SetProperty: clip-level properties (Contrast, Saturation, etc.)
+    - SetCDL: write CDL values (SetCDL exists in real API, GetCDL does NOT)
+    - SetLUT: write LUT path per node (SetLUT exists, GetLUT does NOT)
+    - GetNumNodes/GetNodeLabel: undocumented but working in most Resolve versions
+    """
 
     def __init__(
         self,
@@ -29,6 +38,8 @@ class MockTimelineItem:
         left_offset=0,
         media_pool_item=None,
         properties=None,
+        num_nodes=1,
+        node_labels=None,
     ):
         self._name = name
         self._start = start
@@ -45,6 +56,10 @@ class MockTimelineItem:
             "Contrast": 1.0,
             "Saturation": 1.0,
         }
+        self._num_nodes = num_nodes
+        self._node_labels = node_labels or {}  # {node_index: label}
+        self._node_luts = {}  # {node_index: lut_path}
+        self._cdl = {}  # Last SetCDL() call stored here
 
     def GetName(self):
         return self._name
@@ -69,6 +84,23 @@ class MockTimelineItem:
 
     def SetProperty(self, prop, value):
         self._properties[prop] = value
+
+    # Color node methods (undocumented but working in most Resolve versions)
+    def GetNumNodes(self):
+        return self._num_nodes
+
+    def GetNodeLabel(self, node_index):
+        return self._node_labels.get(node_index, "")
+
+    # SetCDL exists in official API; GetCDL does NOT
+    def SetCDL(self, cdl_map):
+        self._cdl = cdl_map
+        return True
+
+    # SetLUT exists in official API; GetLUT does NOT
+    def SetLUT(self, node_index, lut_path):
+        self._node_luts[node_index] = lut_path
+        return True
 
 
 class MockTimeline:
@@ -133,6 +165,10 @@ class MockTimeline:
             "duration": duration,
         }
 
+    def SetName(self, name):
+        self._name = name
+        return True
+
     def DeleteMarkerAtFrame(self, frame):
         self._markers.pop(frame, None)
 
@@ -148,6 +184,7 @@ class MockTimeline:
 class MockMediaPool:
     def __init__(self):
         self._root = MockFolder()
+        self._timelines = []
 
     def GetRootFolder(self):
         return self._root
@@ -160,6 +197,37 @@ class MockMediaPool:
 
     def AppendToTimeline(self, clip_infos):
         pass
+
+    def CreateEmptyTimeline(self, name):
+        tl = MockTimeline(name=name)
+        self._timelines.append(tl)
+        return tl
+
+    def CreateTimelineFromClips(self, name, clip_infos):
+        """Atomic timeline creation with clips — mirrors Resolve API."""
+        tl = MockTimeline(name=name)
+        items = []
+        for info in clip_infos:
+            pool_item = info.get("mediaPoolItem")
+            start = info.get("startFrame", 0)
+            end = info.get("endFrame", 100)
+            clip_name = ""
+            if pool_item:
+                clip_name = os.path.basename(
+                    pool_item.GetClipProperty("File Path") or "Clip"
+                )
+            item = MockTimelineItem(
+                name=clip_name or "Clip",
+                start=start,
+                end=end,
+                left_offset=start,
+                media_pool_item=pool_item,
+            )
+            items.append(item)
+        if items:
+            tl._video_tracks[1] = items
+        self._timelines.append(tl)
+        return tl
 
 
 class MockFolder:
@@ -181,6 +249,10 @@ class MockProject:
 
     def GetCurrentTimeline(self):
         return self._timeline
+
+    def SetCurrentTimeline(self, timeline):
+        self._timeline = timeline
+        return True
 
     def GetMediaPool(self):
         return self._media_pool
@@ -252,4 +324,7 @@ def create_test_timeline():
     )
 
     project = MockProject(name="My Documentary", timeline=timeline)
+    # Populate the media pool's root folder so _find_media_pool_item can
+    # locate clips without requiring files on disk
+    project.GetMediaPool().GetRootFolder()._clips = [media1, media2]
     return MockResolve(project), project, timeline

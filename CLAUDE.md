@@ -457,6 +457,61 @@ Return the resolved JSON for each domain file.
 
 ---
 
+## Known Resolve API Limitations
+
+Reference: https://deric.github.io/DaVinciResolve-API-Docs/
+
+### Color — Write-Only API
+
+The Resolve scripting API is **write-only** for color grading data. Do NOT attempt to read color values via these non-existent methods:
+
+| Method | Exists? | Notes |
+|--------|---------|-------|
+| `SetCDL()` | **Yes** | Write CDL values (slope, offset, power, saturation) |
+| `GetCDL()` | **NO** | Does not exist — cannot read CDL values |
+| `SetLUT(nodeIndex, path)` | **Yes** | Write LUT per node |
+| `GetLUT(nodeIndex)` | **NO** | Does not exist — cannot read LUT paths |
+| `GetNumNodes()` | Undocumented | Works in practice but not in official API |
+| `GetNodeLabel(nodeIndex)` | Undocumented | Works in practice but not in official API |
+| `GetProperty("Contrast")` | Undocumented | May work for clip-level props, not per-node |
+| Color wheels (Lift/Gamma/Gain) | **NO** | No read API for primary wheel values |
+
+**Current approach:** Capture what `GetProperty()` gives us (contrast, saturation) + node structure, and export DRX stills as binary backup. The `ColorNodeGrade` model has fields for CDL/wheel values that can be populated by manual JSON editing or AI merge, even though the serializer can't read them from Resolve.
+
+### Timeline — No Deletion API
+
+There is **no API to delete clips from a timeline** or to delete a timeline from a project:
+
+- `Timeline.DeleteClips()` — does NOT exist (was tried, fails silently)
+- No `Project.DeleteTimeline()` method exists
+
+**Current approach:** When restoring/switching branches, we create a fresh empty timeline via `MediaPool.CreateEmptyTimeline()`, populate it, and rename the old one with a `.giteo-old` suffix. Old timelines accumulate and must be deleted manually by the user.
+
+### Timeline Restore — Clip Duplication Bug
+
+**Symptom:** When switching back to main (or any branch) for the FIRST time, clips are duplicated (original clips + appended copies). Does NOT happen on subsequent switches. The duplicated clips are identical and reflect the same edits.
+
+**Previous fix attempts that did NOT work:**
+
+1. **Timestamp-based unique suffix for rename** — Used `f"{name}.giteo-old.{timestamp}"` instead of sequential `.giteo-old.1`, `.giteo-old.2`. Ensured rename wouldn't collide with previous `.giteo-old` timelines. **Result:** Still duplicated.
+
+2. **Rename verification** — After `SetName()`, checked `GetName()` to verify the rename took effect. If silent failure, retried with alternative names. **Result:** Still duplicated.
+
+3. **Safety check `_timeline_has_clips()`** — After `_create_fresh_timeline`, checked if the returned timeline actually had clips. If so, retried with a unique fallback name or bailed out. **Result:** Still duplicated.
+
+**Root cause hypothesis:** `AppendToTimeline()` operates on whatever Resolve internally considers the "current" timeline, NOT on the timeline object passed to our code. `SetCurrentTimeline()` is asynchronous — it doesn't take effect immediately (same pattern as `SetCurrentTimecode()` which needs retries + sleep in serializer.py). On the FIRST switch, the old timeline is still "current" internally when `AppendToTimeline` runs, so clips go onto the old (already populated) timeline. On subsequent switches, the previous `SetCurrentTimeline` has long since taken effect.
+
+4. **Temp-name-first + wait/verify (v3)** — Created new timeline with unique temp name before touching old timeline. Added `_wait_for_current_timeline()` with sleep + retry loop to confirm `SetCurrentTimeline` took effect before `AppendToTimeline`. BUT: renames still happened inside `_create_fresh_timeline` before `AppendToTimeline` ran. **Result:** Still duplicated — calling `SetName()` on the old timeline after confirming the switch caused Resolve to re-focus on the old timeline.
+
+**Root cause (confirmed):** `SetName()` on the old timeline causes Resolve to internally re-focus on it. Even though `SetCurrentTimeline(new)` was confirmed, the subsequent `old_timeline.SetName(...)` call (which happened inside `_create_fresh_timeline` before returning) switched Resolve's internal "current" back to the old timeline. `AppendToTimeline` then targeted the old (non-empty) timeline → duplication.
+
+**Current approach (v4):** Three-phase flow in `deserialize_timeline`:
+1. **Create** — `_create_fresh_timeline` creates new timeline with temp name, sets it current, waits for confirmation. Does NOT rename anything.
+2. **Populate** — `AppendToTimeline` runs while no `SetName` calls can interfere with the current timeline.
+3. **Rename** — Only AFTER all clips are populated, rename old timeline to `.giteo-old` and new timeline to the original name.
+
+---
+
 ## Engineering Guidelines
 
 - **Act as a founding engineer** building an MVP under extreme time pressure

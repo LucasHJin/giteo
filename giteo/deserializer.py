@@ -12,6 +12,7 @@ from .models import (
     AudioItem,
     AudioTrack,
     ColorGrade,
+    ColorNodeGrade,
     Marker,
     TimelineMetadata,
     Transform,
@@ -74,13 +75,18 @@ def _apply_metadata(timeline, project, metadata: TimelineMetadata) -> None:
 
 
 def _find_media_pool_item(media_pool, manifest: dict, media_ref: str):
-    """Find or import a media pool item by its asset reference."""
+    """Find or import a media pool item by its asset reference.
+
+    Checks the existing media pool first (the clip may already be imported,
+    even if the source file is offline/moved). Only attempts disk import
+    as a fallback.
+    """
     asset_info = manifest.get("assets", {}).get(media_ref)
     if not asset_info:
         return None
 
     original_path = asset_info.get("original_path", "")
-    if not original_path or not os.path.exists(original_path):
+    if not original_path:
         return None
 
     root_folder = media_pool.GetRootFolder()
@@ -92,6 +98,9 @@ def _find_media_pool_item(media_pool, manifest: dict, media_ref: str):
             if clip_path == original_path:
                 return clip
 
+    if not os.path.exists(original_path):
+        return None
+
     imported = media_pool.ImportMedia([original_path])
     if imported and len(imported) > 0:
         return imported[0]
@@ -99,29 +108,152 @@ def _find_media_pool_item(media_pool, manifest: dict, media_ref: str):
     return None
 
 
-def _clear_timeline(timeline) -> None:
-    """Best-effort removal of existing content before restoring a snapshot.
+def _wait_for_current_timeline(project, expected_timeline, max_retries: int = 10,
+                                delay: float = 0.3) -> bool:
+    """Wait until Resolve's GetCurrentTimeline() returns the expected timeline.
 
-    Resolve's scripting API has limited deletion support, so we try
-    multiple approaches and silently skip any that aren't available.
+    Resolve's SetCurrentTimeline() is asynchronous — AppendToTimeline() targets
+    whatever Resolve internally considers "current", which may still be the OLD
+    timeline if we don't wait. This is the same pattern as SetCurrentTimecode()
+    needing retries + sleep in the serializer.
+
+    Returns True if the switch was confirmed, False if it timed out.
     """
+    import time
     _clear_markers(timeline)
 
-    # Try to remove clips from each track
-    for track_type in ["video", "audio"]:
+    for attempt in range(max_retries):
         try:
-            track_count = timeline.GetTrackCount(track_type)
+            current = project.GetCurrentTimeline()
+            if current is expected_timeline:
+                return True
+            # Also check by name as a fallback — object identity may not
+            # work if Resolve returns wrapper objects
+            if (current and expected_timeline and
+                    current.GetName() == expected_timeline.GetName()):
+                return True
         except (AttributeError, TypeError):
-            continue
+            pass
 
-        for track_idx in range(1, track_count + 1):
+        if attempt == 0:
+            # First retry: also re-issue SetCurrentTimeline in case it was dropped
             try:
-                clips = timeline.GetItemListInTrack(track_type, track_idx)
-                if clips:
-                    # Resolve 18.5+ may support DeleteClips
-                    timeline.DeleteClips(clips, False)
+                project.SetCurrentTimeline(expected_timeline)
             except (AttributeError, TypeError):
                 pass
+
+        time.sleep(delay)
+
+    return False
+
+
+def _create_fresh_timeline(project, media_pool, old_timeline):
+    """Create a fresh empty timeline and set it as current.
+
+    IMPORTANT: This function does NOT rename any timelines. Renaming is
+    deferred until after clips are populated, because calling SetName()
+    on the old timeline can cause Resolve to re-focus on it, which makes
+    AppendToTimeline() target the old (non-empty) timeline instead of
+    the new empty one.
+
+    NOTE: For the main deserialization flow, prefer _create_timeline_with_clips()
+    which uses CreateTimelineFromClips for atomic creation, avoiding the
+    SetCurrentTimeline race condition entirely.
+
+    Returns (new_timeline, old_name) or (old_timeline, None) on failure.
+    """
+    import time
+
+    old_name = old_timeline.GetName() or "Timeline"
+    timestamp = int(time.time())
+
+    temp_name = f"giteo_temp_{timestamp}"
+    new_timeline = media_pool.CreateEmptyTimeline(temp_name)
+
+    if not new_timeline:
+        for i in range(1, 10):
+            new_timeline = media_pool.CreateEmptyTimeline(f"giteo_temp_{timestamp}_{i}")
+            if new_timeline:
+                break
+
+    if not new_timeline:
+        print("  Warning: Could not create fresh timeline — restoring in-place.")
+        return old_timeline, None
+
+    project.SetCurrentTimeline(new_timeline)
+    switched = _wait_for_current_timeline(project, new_timeline)
+
+    if not switched:
+        print("  Warning: Resolve did not confirm timeline switch — "
+              "clips may be placed on wrong timeline.")
+
+    return new_timeline, old_name
+
+
+def _collect_video_clip_infos(media_pool, video_tracks: List[VideoTrack],
+                              manifest: dict) -> List[dict]:
+    """Collect clip info dicts for CreateTimelineFromClips.
+
+    Uses only the documented clip info keys (mediaPoolItem, startFrame,
+    endFrame) to avoid undefined behavior from undocumented parameters.
+    """
+    clip_infos = []
+    for track in video_tracks:
+        for item in track.items:
+            pool_item = _find_media_pool_item(media_pool, manifest, item.media_ref)
+            if not pool_item:
+                print(f"  Warning: Could not find media for '{item.name}' ({item.media_ref})")
+                continue
+            clip_infos.append({
+                "mediaPoolItem": pool_item,
+                "startFrame": item.source_start_frame,
+                "endFrame": item.source_end_frame,
+            })
+    return clip_infos
+
+
+def _create_timeline_with_clips(media_pool, clip_infos: List[dict],
+                                timestamp: int):
+    """Create a new timeline, optionally pre-populated with video clips.
+
+    Uses CreateTimelineFromClips when clips are available — this is an atomic
+    operation that avoids the SetCurrentTimeline race condition that caused
+    clip duplication with the old CreateEmptyTimeline + AppendToTimeline flow.
+
+    Falls back to CreateEmptyTimeline if CreateTimelineFromClips fails or
+    there are no clips to add.
+    """
+    temp_name = f"giteo_temp_{timestamp}"
+    new_timeline = None
+    created_with_clips = False
+
+    if clip_infos:
+        try:
+            new_timeline = media_pool.CreateTimelineFromClips(temp_name, clip_infos)
+            if new_timeline:
+                created_with_clips = True
+        except (AttributeError, TypeError):
+            pass
+
+    if not new_timeline:
+        new_timeline = media_pool.CreateEmptyTimeline(temp_name)
+
+    if not new_timeline:
+        for i in range(1, 5):
+            alt_name = f"giteo_temp_{timestamp}_{i}"
+            if clip_infos:
+                try:
+                    new_timeline = media_pool.CreateTimelineFromClips(alt_name, clip_infos)
+                    if new_timeline:
+                        created_with_clips = True
+                except (AttributeError, TypeError):
+                    pass
+            if not new_timeline:
+                new_timeline = media_pool.CreateEmptyTimeline(alt_name)
+            if new_timeline:
+                break
+
+    return new_timeline, created_with_clips
 
 
 def _clear_markers(timeline) -> None:
@@ -136,7 +268,11 @@ def _clear_markers(timeline) -> None:
 
 
 def _apply_video_tracks(timeline, media_pool, video_tracks: List[VideoTrack], manifest: dict) -> None:
-    """Apply video track items to the Resolve timeline."""
+    """Apply video track items to the Resolve timeline via AppendToTimeline.
+
+    This is the FALLBACK path used only when CreateTimelineFromClips fails.
+    The caller must ensure the timeline is confirmed as current before calling.
+    """
     for track in video_tracks:
         while timeline.GetTrackCount("video") < track.index:
             timeline.AddTrack("video")
@@ -151,19 +287,57 @@ def _apply_video_tracks(timeline, media_pool, video_tracks: List[VideoTrack], ma
                 "mediaPoolItem": pool_item,
                 "startFrame": item.source_start_frame,
                 "endFrame": item.source_end_frame,
-                "trackIndex": item.track_index,
-                "recordFrame": item.record_start_frame,
             }
             media_pool.AppendToTimeline([clip_info])
 
 
-def _apply_audio_tracks(timeline, media_pool, audio_tracks: List[AudioTrack], manifest: dict) -> None:
-    """Apply audio track items to the Resolve timeline."""
+def _apply_audio_properties_only(timeline, audio_tracks: List[AudioTrack]) -> None:
+    """Apply volume/pan to linked audio clips that already exist on the timeline.
+
+    When CreateTimelineFromClips adds a video+audio file, Resolve automatically
+    creates linked audio clips. Calling AppendToTimeline again for the same
+    media would create DUPLICATE video clips. This function only sets audio
+    properties on the clips that are already there.
+    """
+    for track in audio_tracks:
+        audio_count = timeline.GetTrackCount("audio") or 0
+        if audio_count < track.index:
+            continue
+
+        clips = timeline.GetItemListInTrack("audio", track.index)
+        if not clips:
+            continue
+
+        for i, item in enumerate(track.items):
+            if i >= len(clips):
+                break
+            try:
+                clips[i].SetProperty("Volume", item.volume)
+                clips[i].SetProperty("Pan", item.pan)
+            except (AttributeError, TypeError):
+                pass
+
+
+def _apply_audio_tracks(timeline, media_pool, audio_tracks: List[AudioTrack],
+                        manifest: dict, skip_media_refs: set = None) -> None:
+    """Apply audio track items to the Resolve timeline.
+
+    Args:
+        skip_media_refs: Set of media_ref strings to skip (already on timeline
+            as linked audio from CreateTimelineFromClips). Prevents duplicate
+            video clips from being created when AppendToTimeline is called
+            with a video+audio media pool item.
+    """
+    skip_media_refs = skip_media_refs or set()
+
     for track in audio_tracks:
         while timeline.GetTrackCount("audio") < track.index:
             timeline.AddTrack("audio")
 
         for item in track.items:
+            if item.media_ref in skip_media_refs:
+                continue
+
             pool_item = _find_media_pool_item(media_pool, manifest, item.media_ref)
             if not pool_item:
                 print(f"  Warning: Could not find media for audio '{item.id}' ({item.media_ref})")
@@ -173,11 +347,9 @@ def _apply_audio_tracks(timeline, media_pool, audio_tracks: List[AudioTrack], ma
                 "mediaPoolItem": pool_item,
                 "startFrame": item.start_frame,
                 "endFrame": item.end_frame,
-                "trackIndex": track.index,
             }
             media_pool.AppendToTimeline([clip_info])
 
-            # Apply audio properties after the clip is on the timeline
             clips = timeline.GetItemListInTrack("audio", track.index)
             if clips:
                 placed_clip = clips[-1]
@@ -281,8 +453,11 @@ def _apply_color(timeline, color_grades: Dict[str, ColorGrade],
                  project_dir: str = "", resolve_app=None) -> None:
     """Apply color grading data to clips on the timeline.
 
-    Applies DRX grade stills when available (full grade restore),
-    and falls back to LUT-only restore from structural info.
+    Restore priority:
+    1. DRX grade stills (complete grade including curves, qualifiers, etc.)
+    2. CDL values via SetCDL() (if present in JSON — e.g. from manual edit or AI merge)
+    3. Clip-level adjustments via SetProperty() (contrast, saturation, etc.)
+    4. LUT paths via SetLUT() (minimal fallback)
     """
     grades_dir = os.path.join(project_dir, "timeline", "grades") if project_dir else ""
     saved_page = None
@@ -348,17 +523,44 @@ def _apply_markers(timeline, markers: List[Marker]) -> None:
         )
 
 
+def _timeline_has_clips(timeline) -> bool:
+    """Check if a timeline has any clips on it."""
+    try:
+        for track_type in ("video", "audio"):
+            count = timeline.GetTrackCount(track_type)
+            for idx in range(1, (count or 0) + 1):
+                clips = timeline.GetItemListInTrack(track_type, idx)
+                if clips:
+                    return True
+    except (AttributeError, TypeError):
+        pass
+    return False
+
+
 def deserialize_timeline(timeline, project, project_dir: str, resolve_app=None) -> None:
     """Deserialize domain-split JSON files back into a Resolve timeline.
 
-    Clears the existing timeline content first, then re-applies the full
-    snapshot from the domain-split JSON files.
+    Flow:
+    1. Collect video clip infos from JSON
+    2. Create a new timeline atomically with video clips via
+       CreateTimelineFromClips (avoids SetCurrentTimeline race condition)
+    3. Set new timeline as current, verify the switch
+    4. Apply audio, color, markers
+    5. Rename old and new timelines (AFTER all population)
+
+    Previous versions used CreateEmptyTimeline + SetCurrentTimeline +
+    AppendToTimeline, but SetCurrentTimeline is async and AppendToTimeline
+    targets whatever Resolve internally considers "current". When the switch
+    didn't take effect in time, clips were appended to the OLD timeline,
+    causing duplication.
 
     Args:
-        timeline: Resolve Timeline object
+        timeline: Resolve Timeline object (current, will be replaced)
         project: Resolve Project object
         project_dir: Path to the giteo project directory
     """
+    import time
+
     metadata = _load_metadata(project_dir)
     video_tracks = _load_cuts(project_dir)
     audio_tracks = _load_audio(project_dir)
@@ -367,16 +569,73 @@ def deserialize_timeline(timeline, project, project_dir: str, resolve_app=None) 
     manifest = _load_manifest(project_dir)
 
     media_pool = project.GetMediaPool()
+    old_name = timeline.GetName() or "Timeline"
+    timestamp = int(time.time())
 
-    # Clear existing timeline content before restoring
-    _clear_timeline(timeline)
+    # Phase 1: Collect video clip infos for atomic timeline creation
+    video_clip_infos = _collect_video_clip_infos(media_pool, video_tracks, manifest)
 
-    # Apply in order: metadata first, then tracks, then overlays
-    _apply_metadata(timeline, project, metadata)
-    _apply_video_tracks(timeline, media_pool, video_tracks, manifest)
-    _apply_audio_tracks(timeline, media_pool, audio_tracks, manifest)
-    _apply_color(timeline, color_grades, project_dir, resolve_app=resolve_app)
-    _apply_markers(timeline, markers)
+    # Phase 2: Create new timeline atomically with video clips.
+    # CreateTimelineFromClips bypasses the async SetCurrentTimeline race
+    # that caused clip duplication with the old approach.
+    new_timeline, created_with_clips = _create_timeline_with_clips(
+        media_pool, video_clip_infos, timestamp)
+
+    if not new_timeline:
+        print("  ERROR: Could not create new timeline. Aborting to prevent duplication.")
+        print("  Please manually create a new empty timeline and run Switch Branch again.")
+        return
+
+    # Phase 3: Set new timeline as current (needed for audio AppendToTimeline)
+    project.SetCurrentTimeline(new_timeline)
+    switched = _wait_for_current_timeline(project, new_timeline)
+
+    # Phase 4: Apply metadata, video fallback, audio, color, markers
+    _apply_metadata(new_timeline, project, metadata)
+
+    # If CreateTimelineFromClips didn't work, fall back to AppendToTimeline
+    # but ONLY if we confirmed the timeline switch
+    if video_clip_infos and not created_with_clips:
+        if switched:
+            _apply_video_tracks(new_timeline, media_pool, video_tracks, manifest)
+        else:
+            print("  ERROR: Could not confirm timeline switch. "
+                  "Skipping video clips to prevent duplication.")
+
+    # Audio handling depends on how video clips were added.
+    # When CreateTimelineFromClips adds a video+audio file, Resolve auto-creates
+    # linked audio clips. Calling AppendToTimeline again with the SAME media
+    # creates duplicate video clips. So:
+    #   - Apply volume/pan to linked audio that already exists
+    #   - Only AppendToTimeline for standalone audio (media not in video tracks)
+    if audio_tracks:
+        if created_with_clips:
+            _apply_audio_properties_only(new_timeline, audio_tracks)
+            video_refs = {
+                item.media_ref for track in video_tracks for item in track.items
+            }
+            if switched:
+                _apply_audio_tracks(
+                    new_timeline, media_pool, audio_tracks, manifest,
+                    skip_media_refs=video_refs,
+                )
+        elif switched:
+            _apply_audio_tracks(new_timeline, media_pool, audio_tracks, manifest)
+        else:
+            print("  Warning: Skipping audio tracks — could not confirm timeline switch.")
+
+    _apply_color(new_timeline, color_grades, project_dir)
+    _apply_markers(new_timeline, markers)
+
+    # Phase 5: Rename (AFTER all population is done)
+    try:
+        timeline.SetName(f"{old_name}.giteo-old.{timestamp}")
+    except (AttributeError, TypeError):
+        pass
+    try:
+        new_timeline.SetName(old_name)
+    except (AttributeError, TypeError):
+        pass
 
     print(f"  Restored timeline '{metadata.timeline_name}' from giteo snapshot")
 

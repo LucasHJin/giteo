@@ -74,6 +74,56 @@ def test_color_json_has_grades(project_dir):
     assert len(color["grades"]) == 2
 
 
+def test_color_json_captures_adjustments(project_dir):
+    """color.json should capture clip-level Contrast and Saturation from GetProperty()."""
+    from tests.mock_resolve import (
+        MockTimelineItem, MockMediaPoolItem, MockTimeline, MockProject, MockResolve,
+    )
+
+    media = MockMediaPoolItem(filepath="/Volumes/Media/Clip.mov", frames=1000)
+    clip = MockTimelineItem(
+        name="Graded_Clip",
+        start=0,
+        end=500,
+        media_pool_item=media,
+        properties={
+            "Pan": 0.0, "Tilt": 0.0, "ZoomX": 1.0, "ZoomY": 1.0,
+            "Opacity": 100.0, "Volume": 0.0,
+            "Contrast": 1.25,
+            "Saturation": 0.85,
+        },
+        num_nodes=2,
+        node_labels={1: "Base Grade", 2: "Film Look"},
+    )
+
+    timeline = MockTimeline(
+        name="Color Test",
+        video_tracks={1: [clip]},
+    )
+    project = MockProject(name="Color Project", timeline=timeline)
+
+    serialize_timeline(timeline, project, project_dir)
+    color = read_json(os.path.join(project_dir, "timeline", "color.json"))
+
+    grade = color["grades"]["item_001_000"]
+    assert grade["num_nodes"] == 2
+    assert len(grade["nodes"]) == 2
+
+    # First node should have clip-level adjustments
+    node1 = grade["nodes"][0]
+    assert node1["index"] == 1
+    assert node1["label"] == "Base Grade"
+    assert node1["contrast"] == 1.25
+    assert node1["saturation"] == 0.85
+
+    # Second node should have its label
+    node2 = grade["nodes"][1]
+    assert node2["index"] == 2
+    assert node2["label"] == "Film Look"
+    # No adjustments on node 2 (clip-level props only go on node 1)
+    assert "contrast" not in node2
+
+
 def test_audio_json_structure(project_dir):
     """audio.json should contain audio tracks with items."""
     _, project, timeline = create_test_timeline()

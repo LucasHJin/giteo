@@ -142,32 +142,99 @@ class AudioTrack:
 
 
 @dataclass
+class ColorNodeGrade:
+    """Color correction values for a single node in the color graph.
+
+    Captures CDL (Color Decision List) values and primary color wheels
+    that Resolve exposes via its scripting API.
+    """
+    index: int = 1
+    label: str = ""
+    lut: str = ""
+
+    # CDL values (ASC-CDL standard: slope * input + offset) ^ power
+    slope: Optional[List[float]] = None      # [R, G, B] multipliers (default 1,1,1)
+    offset: Optional[List[float]] = None     # [R, G, B] offsets (default 0,0,0)
+    power: Optional[List[float]] = None      # [R, G, B] gamma (default 1,1,1)
+    saturation: Optional[float] = None       # Overall saturation (default 1.0)
+
+    # Primary color wheels (Resolve's Lift/Gamma/Gain/Offset wheels)
+    lift: Optional[Dict[str, float]] = None    # {"r": 0, "g": 0, "b": 0, "y": 0}
+    gamma: Optional[Dict[str, float]] = None   # {"r": 0, "g": 0, "b": 0, "y": 0}
+    gain: Optional[Dict[str, float]] = None    # {"r": 1, "g": 1, "b": 1, "y": 1}
+    color_offset: Optional[Dict[str, float]] = None  # {"r": 0, "g": 0, "b": 0, "y": 0}
+
+    # Contrast / Pivot / Hue / Saturation adjustments
+    contrast: Optional[float] = None
+    pivot: Optional[float] = None
+    hue: Optional[float] = None
+    color_boost: Optional[float] = None
+
+    def to_dict(self) -> dict:
+        d: dict = {"index": self.index, "label": self.label, "lut": self.lut}
+        # Only include color values that were actually read (not None)
+        for key in ["slope", "offset", "power", "saturation",
+                     "lift", "gamma", "gain", "color_offset",
+                     "contrast", "pivot", "hue", "color_boost"]:
+            val = getattr(self, key)
+            if val is not None:
+                d[key] = val
+        return d
+
+    @classmethod
+    def from_dict(cls, d: dict) -> "ColorNodeGrade":
+        return cls(
+            index=d.get("index", 1),
+            label=d.get("label", ""),
+            lut=d.get("lut", ""),
+            slope=d.get("slope"),
+            offset=d.get("offset"),
+            power=d.get("power"),
+            saturation=d.get("saturation"),
+            lift=d.get("lift"),
+            gamma=d.get("gamma"),
+            gain=d.get("gain"),
+            color_offset=d.get("color_offset"),
+            contrast=d.get("contrast"),
+            pivot=d.get("pivot"),
+            hue=d.get("hue"),
+            color_boost=d.get("color_boost"),
+        )
+
+
+@dataclass
 class ColorGrade:
     """Color grade state for a single clip.
 
-    The Resolve API exposes SetCDL() but not GetCDL(), so we can't read
-    actual color wheel values. Instead we capture:
-      - Structural info readable via API (node count, labels, LUT paths)
-      - Full grade as a DRX still (binary, git-tracked)
+    Captures per-node color correction values (CDL, primary wheels,
+    contrast/hue/saturation), structural info, and optionally a DRX
+    still for full-fidelity binary backup.
     """
     num_nodes: int = 1
-    nodes: List[dict] = field(default_factory=list)
+    nodes: List[ColorNodeGrade] = field(default_factory=list)
     version_name: str = ""
     drx_file: Optional[str] = None
 
     def to_dict(self) -> dict:
         return {
             "num_nodes": self.num_nodes,
-            "nodes": self.nodes,
+            "nodes": [n.to_dict() for n in self.nodes],
             "version_name": self.version_name,
             "drx_file": self.drx_file,
         }
 
     @classmethod
     def from_dict(cls, d: dict) -> "ColorGrade":
+        raw_nodes = d.get("nodes", [])
+        nodes = []
+        for n in raw_nodes:
+            if isinstance(n, dict):
+                nodes.append(ColorNodeGrade.from_dict(n))
+            else:
+                nodes.append(n)
         return cls(
             num_nodes=d.get("num_nodes", 1),
-            nodes=d.get("nodes", []),
+            nodes=nodes,
             version_name=d.get("version_name", ""),
             drx_file=d.get("drx_file"),
         )
