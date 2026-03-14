@@ -151,23 +151,34 @@ def cmd_merge(args):
         print("  Git merge succeeded.")
         issues = validate_project(project_dir)
 
-        if not issues:
+        # Get merge base and branch files for overlap detection
+        merge_base_ref = git_merge_base(project_dir, current, branch)
+        base_files = _load_files_at_ref(project_dir, merge_base_ref) if merge_base_ref else {}
+        theirs_files = _load_files_at_ref(project_dir, branch)
+
+        # Check if both branches modified the same domain files
+        overlapping_domains = _detect_overlapping_domains(
+            base_files, pre_merge_files, theirs_files
+        )
+
+        errors = [i for i in issues if i.severity == "error"]
+        needs_ai_review = (
+            not args.no_ai and (errors or overlapping_domains)
+        )
+
+        if not issues and not overlapping_domains:
             print("  Post-merge validation passed.")
             return
 
-        # Issues found — offer AI resolution
-        errors = [i for i in issues if i.severity == "error"]
-        print(f"\n  Post-merge validation found issues:")
-        print(format_issues(issues))
+        if issues:
+            print(f"\n  Post-merge validation found issues:")
+            print(format_issues(issues))
 
-        if errors and not args.no_ai:
-            print("\n  Attempting AI-assisted resolution...")
+        if overlapping_domains and not issues:
+            print(f"\n  Both branches modified: {', '.join(overlapping_domains)}")
+            print("  Running AI review to check for semantic conflicts...")
 
-            # Get base, ours, theirs versions
-            merge_base_ref = git_merge_base(project_dir, current, branch)
-            base_files = _load_files_at_ref(project_dir, merge_base_ref) if merge_base_ref else {}
-            theirs_files = _load_files_at_ref(project_dir, branch)
-
+        if needs_ai_review:
             from .ai_merge import merge_with_ai
             resolved = merge_with_ai(
                 project_dir, branch,
@@ -179,7 +190,10 @@ def cmd_merge(args):
                 git_commit(project_dir, f"giteo: AI-resolved merge of '{branch}'")
                 print("  Merge complete with AI resolution.")
             else:
-                print("  Merge completed with unresolved issues. Review manually.")
+                if errors:
+                    print("  Merge completed with unresolved issues. Review manually.")
+                else:
+                    print("  AI review declined. Merge completed.")
         else:
             if errors:
                 print("  Merge completed with issues. Review manually.")
@@ -242,6 +256,33 @@ def _load_files_at_ref(project_dir: str, ref: str) -> dict:
         else:
             files[domain] = {}
     return files
+
+
+def _detect_overlapping_domains(
+    base_files: dict,
+    ours_files: dict,
+    theirs_files: dict,
+) -> list:
+    """Detect which domain files were modified by both branches.
+
+    Returns list of domain names that both branches modified relative to the base.
+    This indicates potential semantic conflicts that git may not catch.
+    """
+    overlapping = []
+
+    for domain in base_files.keys():
+        base_content = base_files.get(domain, {})
+        ours_content = ours_files.get(domain, {})
+        theirs_content = theirs_files.get(domain, {})
+
+        # Check if both branches modified this domain
+        ours_changed = base_content != ours_content
+        theirs_changed = base_content != theirs_content
+
+        if ours_changed and theirs_changed:
+            overlapping.append(domain)
+
+    return overlapping
 
 
 def cmd_diff(args):
