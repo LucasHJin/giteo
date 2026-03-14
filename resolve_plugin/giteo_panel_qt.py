@@ -88,6 +88,10 @@ SVG_CHEVRON_LEFT = """<svg width="12" height="12" viewBox="0 0 12 12" fill="none
   <path d="M7.5 3L4.5 6L7.5 9" stroke="{color}" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
 </svg>"""
 
+SVG_CLOSE = """<svg width="12" height="12" viewBox="0 0 12 12" fill="none">
+  <path d="M2 2L10 10M10 2L2 10" stroke="{color}" stroke-width="2" stroke-linecap="round"/>
+</svg>"""
+
 SVG_SPARKLE = """<svg width="16" height="16" viewBox="0 0 16 16" fill="none">
   <path d="M8 1l1.5 4.5L14 7l-4.5 1.5L8 13l-1.5-4.5L2 7l4.5-1.5L8 1z" fill="{color}"/>
 </svg>"""
@@ -1009,43 +1013,61 @@ class GiteoPanel(QMainWindow):
         header = QHBoxLayout()
         header.setSpacing(8)
 
+        # Close button (top left) — no background, square, icon only
+        close_btn = QPushButton()
+        close_btn.setIcon(svg_to_icon(SVG_CLOSE, TEXT_PRIMARY, 12))
+        close_btn.setIconSize(QSize(12, 12))
+        close_btn.setFixedSize(24, 24)
+        close_btn.setCursor(Qt.PointingHandCursor)
+        close_btn.setStyleSheet(f"""
+            QPushButton {{
+                background-color: transparent;
+                border: none;
+            }}
+            QPushButton:hover {{
+                background-color: rgba(255, 255, 255, 0.1);
+                border-radius: 4px;
+            }}
+        """)
+        close_btn.clicked.connect(self.close)
+        header.addWidget(close_btn, alignment=Qt.AlignVCenter)
+
         # Logo
         logo_label = QLabel()
         logo_label.setPixmap(svg_to_pixmap(SVG_LOGO, ORANGE, 24))
         logo_label.setFixedSize(24, 24)
-        header.addWidget(logo_label)
+        header.addWidget(logo_label, alignment=Qt.AlignVCenter)
 
         # Title
         title = QLabel("vit")
         title.setObjectName("titleLabel")
-        header.addWidget(title)
+        header.addWidget(title, alignment=Qt.AlignVCenter)
 
         header.addStretch()
 
         # Branch label
         self.branch_label = QLabel("BRANCH: —")
         self.branch_label.setObjectName("branchLabel")
-        header.addWidget(self.branch_label)
+        header.addWidget(self.branch_label, alignment=Qt.AlignVCenter)
 
-        # Collapse chevron
-        self._chevron_btn = QPushButton("▶")
-        self._chevron_btn.setFixedSize(28, 28)
+        # Collapse chevron — no background, square, icon only
+        self._chevron_btn = QPushButton()
+        self._chevron_btn.setIcon(svg_to_icon(SVG_CHEVRON_RIGHT, TEXT_PRIMARY, 12))
+        self._chevron_btn.setIconSize(QSize(12, 12))
+        self._chevron_btn.setFixedSize(24, 24)
         self._chevron_btn.setCursor(Qt.PointingHandCursor)
         self._chevron_btn.setStyleSheet(f"""
             QPushButton {{
-                background-color: {ORANGE};
-                color: {TEXT_BLACK};
+                background-color: transparent;
                 border: none;
-                border-radius: 14px;
-                font-size: 12px;
-                font-weight: bold;
             }}
             QPushButton:hover {{
-                background-color: {ORANGE_HOVER};
+                background-color: rgba(255, 255, 255, 0.1);
+                border-radius: 4px;
             }}
         """)
         self._chevron_btn.clicked.connect(self.toggle_panel)
-        header.addWidget(self._chevron_btn)
+        header.addWidget(self._chevron_btn, alignment=Qt.AlignVCenter)
 
         content_layout.addLayout(header)
 
@@ -1131,20 +1153,19 @@ class GiteoPanel(QMainWindow):
         tab_layout = QVBoxLayout(self._tab)
         tab_layout.setContentsMargins(4, 12, 4, 12)
 
-        tab_btn = QPushButton("◀")
+        tab_btn = QPushButton()
+        tab_btn.setIcon(svg_to_icon(SVG_CHEVRON_LEFT, TEXT_PRIMARY, 14))
+        tab_btn.setIconSize(QSize(14, 14))
         tab_btn.setFixedSize(32, 48)
         tab_btn.setCursor(Qt.PointingHandCursor)
         tab_btn.setStyleSheet(f"""
             QPushButton {{
-                background-color: {ORANGE};
-                color: {TEXT_BLACK};
+                background-color: transparent;
                 border: none;
-                border-radius: 4px;
-                font-size: 14px;
-                font-weight: bold;
             }}
             QPushButton:hover {{
-                background-color: {ORANGE_HOVER};
+                background-color: rgba(255, 255, 255, 0.1);
+                border-radius: 4px;
             }}
         """)
         tab_btn.clicked.connect(self.toggle_panel)
