@@ -157,6 +157,91 @@ def test_diff_metadata_changed():
     assert "project_name" in lines[0]
 
 
+def test_diff_cuts_speed_changed():
+    """Speed changes on a clip should appear in the diff."""
+    old = {
+        "video_tracks": [
+            {
+                "index": 1,
+                "items": [
+                    {
+                        "id": "item_001",
+                        "name": "Action.mov",
+                        "track_index": 1,
+                        "record_start_frame": 0,
+                        "record_end_frame": 480,
+                    }
+                ],
+            }
+        ]
+    }
+    new = {
+        "video_tracks": [
+            {
+                "index": 1,
+                "items": [
+                    {
+                        "id": "item_001",
+                        "name": "Action.mov",
+                        "track_index": 1,
+                        "record_start_frame": 0,
+                        "record_end_frame": 480,
+                        "speed": {
+                            "speed_percent": 50.0,
+                            "retime_process": 3,
+                        },
+                    }
+                ],
+            }
+        ]
+    }
+
+    lines = diff_cuts(old, new, fps=24.0)
+    speed_lines = [l for l in lines if "Speed" in l]
+    assert len(speed_lines) >= 1
+    assert "50.0%" in speed_lines[0]
+    assert "slow" in speed_lines[0]
+
+    retime_lines = [l for l in lines if "Retime" in l]
+    assert len(retime_lines) == 1
+    assert "optical_flow" in retime_lines[0]
+
+
+def test_diff_audio_speed_changed():
+    """Speed changes on audio clips should appear in the diff."""
+    old = {
+        "audio_tracks": [
+            {
+                "index": 1,
+                "items": [
+                    {"id": "audio_001", "volume": 0.0, "pan": 0.0}
+                ],
+            }
+        ]
+    }
+    new = {
+        "audio_tracks": [
+            {
+                "index": 1,
+                "items": [
+                    {
+                        "id": "audio_001",
+                        "volume": 0.0,
+                        "pan": 0.0,
+                        "speed": {"speed_percent": 200.0},
+                    }
+                ],
+            }
+        ]
+    }
+
+    lines = diff_audio(old, new, fps=24.0)
+    speed_lines = [l for l in lines if "Speed" in l]
+    assert len(speed_lines) == 1
+    assert "200.0%" in speed_lines[0]
+    assert "fast" in speed_lines[0]
+
+
 def test_format_diff_no_changes():
     files = {"cuts": {}, "color": {}, "audio": {}, "markers": {}, "metadata": {}}
     output = format_diff(files, files, timeline_name="Test")

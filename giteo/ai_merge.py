@@ -106,6 +106,9 @@ MERGE RULES:
 - If a clip was deleted in one branch, remove its references from ALL domain files
 - Audio clip boundaries must match their corresponding video clip boundaries  
 - No two clips may overlap on the same track at the same timecode
+- Linked video and audio clips must have matching speed values
+- If a clip's speed changes, its record duration (timeline footprint) changes too — \
+verify that record_end_frame - record_start_frame ≈ source_duration / (speed_percent / 100)
 - Preserve as much work from both branches as possible
 - When in doubt, prefer the branch that made the more structural changes
 

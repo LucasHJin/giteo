@@ -14,6 +14,7 @@ from .models import (
     ColorGrade,
     ColorNodeGrade,
     Marker,
+    SpeedChange,
     TimelineMetadata,
     Transform,
     VideoItem,
@@ -359,6 +360,62 @@ def _apply_audio_tracks(timeline, media_pool, audio_tracks: List[AudioTrack],
                     pass
 
 
+def _apply_speed(clip, speed: SpeedChange, item_id: str) -> None:
+    """Apply speed/retime properties to a Resolve timeline item."""
+    if not speed.is_retimed and speed.retime_process == 0 and speed.motion_estimation == 0:
+        return
+
+    if speed.retime_process != 0:
+        try:
+            clip.SetProperty("RetimeProcess", speed.retime_process)
+        except (AttributeError, TypeError):
+            pass
+
+    if speed.motion_estimation != 0:
+        try:
+            clip.SetProperty("MotionEstimation", speed.motion_estimation)
+        except (AttributeError, TypeError):
+            pass
+
+    if speed.is_retimed:
+        try:
+            result = clip.SetProperty("Speed", speed.speed_percent)
+            if not result:
+                print(f"  Warning: SetProperty('Speed') returned False for {item_id}")
+        except (AttributeError, TypeError) as e:
+            print(f"  Warning: Could not set speed for {item_id}: {e}")
+
+
+def _apply_video_speed(timeline, video_tracks: List[VideoTrack]) -> None:
+    """Apply speed changes to video clips already on the timeline."""
+    track_count = timeline.GetTrackCount("video")
+    for track in video_tracks:
+        if track.index > track_count:
+            continue
+        clips = timeline.GetItemListInTrack("video", track.index)
+        if not clips:
+            continue
+        for i, item in enumerate(track.items):
+            if i >= len(clips):
+                break
+            _apply_speed(clips[i], item.speed, item.id)
+
+
+def _apply_audio_speed(timeline, audio_tracks: List[AudioTrack]) -> None:
+    """Apply speed changes to audio clips already on the timeline."""
+    audio_count = timeline.GetTrackCount("audio") or 0
+    for track in audio_tracks:
+        if track.index > audio_count:
+            continue
+        clips = timeline.GetItemListInTrack("audio", track.index)
+        if not clips:
+            continue
+        for i, item in enumerate(track.items):
+            if i >= len(clips):
+                break
+            _apply_speed(clips[i], item.speed, item.id)
+
+
 def _apply_grade_from_drx(timeline, clip, drx_path: str, item_id: str) -> bool:
     """Apply a DRX grade using whichever Resolve API is actually available."""
     timeline_apply = getattr(timeline, "ApplyGradeFromDRX", None)
@@ -673,6 +730,8 @@ def deserialize_timeline(timeline, project, project_dir: str, resolve_app=None) 
         else:
             print("  Warning: Skipping audio tracks — could not confirm timeline switch.")
 
+    _apply_video_speed(new_timeline, video_tracks)
+    _apply_audio_speed(new_timeline, audio_tracks)
     _apply_color(new_timeline, color_grades, project_dir, resolve_app=resolve_app)
     _apply_markers(new_timeline, markers)
 

@@ -17,6 +17,7 @@ from .models import (
     ColorGrade,
     ColorNodeGrade,
     Marker,
+    SpeedChange,
     Timeline,
     TimelineMetadata,
     Transform,
@@ -50,6 +51,44 @@ def _get_clip_transform(clip) -> Transform:
         )
     except (AttributeError, TypeError):
         return Transform()
+
+
+def _get_clip_speed(clip) -> SpeedChange:
+    """Extract speed/retime properties from a Resolve timeline item.
+
+    Resolve exposes constant speed via GetProperty("Speed") as a percentage
+    (100.0 = normal). Variable speed ramps are NOT accessible via the API.
+    """
+    speed_pct = 100.0
+    retime_process = 0
+    motion_est = 0
+
+    try:
+        val = clip.GetProperty("Speed")
+        if val is not None:
+            speed_pct = float(val)
+    except (AttributeError, TypeError, ValueError):
+        pass
+
+    try:
+        val = clip.GetProperty("RetimeProcess")
+        if val is not None:
+            retime_process = int(val)
+    except (AttributeError, TypeError, ValueError):
+        pass
+
+    try:
+        val = clip.GetProperty("MotionEstimation")
+        if val is not None:
+            motion_est = int(val)
+    except (AttributeError, TypeError, ValueError):
+        pass
+
+    return SpeedChange(
+        speed_percent=speed_pct,
+        retime_process=retime_process,
+        motion_estimation=motion_est,
+    )
 
 
 def _serialize_video_tracks(timeline) -> Tuple[List[VideoTrack], Dict[str, Asset]]:
@@ -100,6 +139,7 @@ def _serialize_video_tracks(timeline) -> Tuple[List[VideoTrack], Dict[str, Asset
                 source_end_frame=int(clip.GetLeftOffset()) + int(clip.GetDuration()),
                 track_index=track_idx,
                 transform=_get_clip_transform(clip),
+                speed=_get_clip_speed(clip),
             )
             items.append(video_item)
 
@@ -134,6 +174,7 @@ def _serialize_audio_tracks(timeline) -> List[AudioTrack]:
                 end_frame=int(clip.GetEnd()),
                 volume=float(clip.GetProperty("Volume") or 0.0),
                 pan=float(clip.GetProperty("Pan") or 0.0),
+                speed=_get_clip_speed(clip),
             )
             items.append(audio_item)
 

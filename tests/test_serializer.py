@@ -197,6 +197,55 @@ def test_json_formatting(project_dir):
     assert content == re_serialized
 
 
+def test_speed_serialized_when_retimed(project_dir):
+    """clips with non-100% speed should include a speed object in cuts.json."""
+    from tests.mock_resolve import (
+        MockTimelineItem, MockMediaPoolItem, MockTimeline, MockProject,
+    )
+
+    media = MockMediaPoolItem(filepath="/Volumes/Media/Action.mov", frames=2400)
+    clip = MockTimelineItem(
+        name="Action_Shot",
+        start=0,
+        end=600,
+        left_offset=0,
+        media_pool_item=media,
+        properties={
+            "Pan": 0.0, "Tilt": 0.0, "ZoomX": 1.0, "ZoomY": 1.0,
+            "Opacity": 100.0, "Volume": 0.0,
+            "Contrast": 1.0, "Saturation": 1.0,
+            "Speed": 50.0,
+            "RetimeProcess": 3,
+            "MotionEstimation": 4,
+        },
+    )
+
+    timeline = MockTimeline(name="Speed Test", video_tracks={1: [clip]})
+    project = MockProject(name="Speed Project", timeline=timeline)
+
+    serialize_timeline(timeline, project, project_dir)
+    cuts = read_json(os.path.join(project_dir, "timeline", "cuts.json"))
+
+    item = cuts["video_tracks"][0]["items"][0]
+    assert "speed" in item
+    assert item["speed"]["speed_percent"] == 50.0
+    assert item["speed"]["retime_process"] == 3
+    assert item["speed"]["retime_process_name"] == "optical_flow"
+    assert item["speed"]["motion_estimation"] == 4
+    assert item["speed"]["motion_estimation_name"] == "enhanced_better"
+
+
+def test_speed_omitted_at_normal(project_dir):
+    """Clips at 100% speed should NOT include a speed object (keeps JSON clean)."""
+    _, project, timeline = create_test_timeline()
+    serialize_timeline(timeline, project, project_dir)
+
+    cuts = read_json(os.path.join(project_dir, "timeline", "cuts.json"))
+    for track in cuts["video_tracks"]:
+        for item in track["items"]:
+            assert "speed" not in item
+
+
 def test_read_all_domain_files(project_dir):
     """read_all_domain_files should return all domains."""
     _, project, timeline = create_test_timeline()

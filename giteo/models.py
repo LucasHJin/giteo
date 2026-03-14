@@ -32,6 +32,73 @@ class Transform:
         )
 
 
+RETIME_PROCESS_NAMES = {
+    0: "project_default",
+    1: "nearest",
+    2: "frame_blend",
+    3: "optical_flow",
+}
+
+MOTION_EST_NAMES = {
+    0: "project_default",
+    1: "standard_faster",
+    2: "standard_better",
+    3: "enhanced_faster",
+    4: "enhanced_better",
+    5: "speed_warp",
+}
+
+
+@dataclass
+class SpeedChange:
+    """Retime/speed change state for a clip.
+
+    Resolve exposes constant speed changes via GetProperty("Speed").
+    Variable speed ramps (speed curves) are NOT accessible via the API.
+
+    Attributes:
+        speed_percent: Playback speed as percentage. 100.0 = normal,
+            200.0 = 2x fast, 50.0 = half speed (slow-mo).
+        retime_process: Interpolation method (0=project, 1=nearest,
+            2=frame_blend, 3=optical_flow).
+        motion_estimation: Motion estimation quality for optical flow
+            (0=project, 1..5 = standard_faster through speed_warp).
+    """
+    speed_percent: float = 100.0
+    retime_process: int = 0
+    motion_estimation: int = 0
+
+    @property
+    def is_retimed(self) -> bool:
+        return self.speed_percent != 100.0
+
+    @property
+    def multiplier(self) -> float:
+        return self.speed_percent / 100.0
+
+    def to_dict(self) -> dict:
+        d: dict = {"speed_percent": round(self.speed_percent, 4)}
+        if self.retime_process != 0:
+            d["retime_process"] = self.retime_process
+            d["retime_process_name"] = RETIME_PROCESS_NAMES.get(
+                self.retime_process, "unknown"
+            )
+        if self.motion_estimation != 0:
+            d["motion_estimation"] = self.motion_estimation
+            d["motion_estimation_name"] = MOTION_EST_NAMES.get(
+                self.motion_estimation, "unknown"
+            )
+        return d
+
+    @classmethod
+    def from_dict(cls, d: dict) -> "SpeedChange":
+        return cls(
+            speed_percent=d.get("speed_percent", 100.0),
+            retime_process=d.get("retime_process", 0),
+            motion_estimation=d.get("motion_estimation", 0),
+        )
+
+
 @dataclass
 class VideoItem:
     id: str
@@ -43,9 +110,10 @@ class VideoItem:
     source_end_frame: int
     track_index: int
     transform: Transform = field(default_factory=Transform)
+    speed: SpeedChange = field(default_factory=SpeedChange)
 
     def to_dict(self) -> dict:
-        return {
+        d = {
             "id": self.id,
             "name": self.name,
             "media_ref": self.media_ref,
@@ -56,6 +124,9 @@ class VideoItem:
             "track_index": self.track_index,
             "transform": self.transform.to_dict(),
         }
+        if self.speed.is_retimed:
+            d["speed"] = self.speed.to_dict()
+        return d
 
     @classmethod
     def from_dict(cls, d: dict) -> "VideoItem":
@@ -69,6 +140,7 @@ class VideoItem:
             source_end_frame=d["source_end_frame"],
             track_index=d["track_index"],
             transform=Transform.from_dict(d.get("transform", {})),
+            speed=SpeedChange.from_dict(d["speed"]) if "speed" in d else SpeedChange(),
         )
 
 
@@ -99,9 +171,10 @@ class AudioItem:
     end_frame: int
     volume: float = 0.0
     pan: float = 0.0
+    speed: SpeedChange = field(default_factory=SpeedChange)
 
     def to_dict(self) -> dict:
-        return {
+        d = {
             "id": self.id,
             "media_ref": self.media_ref,
             "start_frame": self.start_frame,
@@ -109,6 +182,9 @@ class AudioItem:
             "volume": self.volume,
             "pan": self.pan,
         }
+        if self.speed.is_retimed:
+            d["speed"] = self.speed.to_dict()
+        return d
 
     @classmethod
     def from_dict(cls, d: dict) -> "AudioItem":
@@ -119,6 +195,7 @@ class AudioItem:
             end_frame=d["end_frame"],
             volume=d.get("volume", 0.0),
             pan=d.get("pan", 0.0),
+            speed=SpeedChange.from_dict(d["speed"]) if "speed" in d else SpeedChange(),
         )
 
 

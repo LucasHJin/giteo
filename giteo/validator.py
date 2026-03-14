@@ -41,6 +41,8 @@ def validate_project(project_dir: str) -> List[ValidationIssue]:
     issues.extend(_check_overlapping_clips(cuts))
     issues.extend(_check_audio_video_sync(cuts, audio))
     issues.extend(_check_track_count_consistency(cuts, audio, metadata))
+    issues.extend(_check_speed_duration_consistency(cuts))
+    issues.extend(_check_speed_sync(cuts, audio))
 
     return issues
 
@@ -188,6 +190,91 @@ def _check_track_count_consistency(cuts: dict, audio: dict, metadata: dict) -> L
             message=f"Metadata says {expected_audio} audio tracks, but audio.json has {actual_audio}",
             details={"expected": expected_audio, "actual": actual_audio, "domain": "audio"},
         ))
+
+    return issues
+
+
+def _check_speed_duration_consistency(cuts: dict) -> List[ValidationIssue]:
+    """Check that retimed clips have plausible record durations.
+
+    When a clip has a speed change, the record duration (timeline footprint)
+    should roughly equal source_duration / speed_multiplier. Large mismatches
+    suggest the speed metadata is stale after a merge.
+    """
+    issues = []
+    for track in cuts.get("video_tracks", []):
+        for item in track.get("items", []):
+            speed = item.get("speed", {})
+            pct = speed.get("speed_percent", 100.0)
+            if pct == 100.0 or pct <= 0:
+                continue
+
+            record_dur = item.get("record_end_frame", 0) - item.get("record_start_frame", 0)
+            source_dur = item.get("source_end_frame", 0) - item.get("source_start_frame", 0)
+            if source_dur <= 0 or record_dur <= 0:
+                continue
+
+            expected_record = source_dur / (pct / 100.0)
+            # Allow 10% tolerance for rounding and frame-boundary effects
+            if abs(record_dur - expected_record) > max(expected_record * 0.1, 2):
+                issues.append(ValidationIssue(
+                    severity="warning",
+                    category="speed_duration",
+                    message=(
+                        f"Clip '{item.get('name', '?')}' has {pct}% speed but "
+                        f"record duration ({record_dur}f) doesn't match expected "
+                        f"({expected_record:.0f}f) — may be stale after merge"
+                    ),
+                    details={
+                        "item_id": item.get("id"),
+                        "speed_percent": pct,
+                        "record_duration": record_dur,
+                        "expected_duration": round(expected_record),
+                    },
+                ))
+    return issues
+
+
+def _check_speed_sync(cuts: dict, audio: dict) -> List[ValidationIssue]:
+    """Check that linked video and audio clips have matching speed values.
+
+    If one branch changes a video clip's speed but the audio branch doesn't
+    update the corresponding audio clip, they'll be out of sync.
+    """
+    issues = []
+    video_by_ref: Dict[str, dict] = {}
+    for track in cuts.get("video_tracks", []):
+        for item in track.get("items", []):
+            ref = item.get("media_ref")
+            if ref:
+                video_by_ref[ref] = item
+
+    for track in audio.get("audio_tracks", []):
+        for audio_item in track.get("items", []):
+            ref = audio_item.get("media_ref")
+            if not ref or ref not in video_by_ref:
+                continue
+
+            video_item = video_by_ref[ref]
+            v_speed = video_item.get("speed", {}).get("speed_percent", 100.0)
+            a_speed = audio_item.get("speed", {}).get("speed_percent", 100.0)
+
+            if v_speed != a_speed:
+                issues.append(ValidationIssue(
+                    severity="warning",
+                    category="speed_sync",
+                    message=(
+                        f"Speed mismatch for linked media '{ref}': "
+                        f"video={v_speed}% vs audio={a_speed}%"
+                    ),
+                    details={
+                        "media_ref": ref,
+                        "video_item": video_item.get("id"),
+                        "audio_item": audio_item.get("id"),
+                        "video_speed": v_speed,
+                        "audio_speed": a_speed,
+                    },
+                ))
 
     return issues
 

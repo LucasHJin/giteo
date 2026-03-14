@@ -121,3 +121,86 @@ def test_track_count_mismatch(project_dir):
     tc_issues = [i for i in issues if i.category == "track_count"]
     assert len(tc_issues) == 1
     assert "video" in tc_issues[0].message.lower()
+
+
+def test_speed_duration_consistency(project_dir):
+    """A retimed clip whose record duration doesn't match speed should warn."""
+    _write_domain_files(
+        project_dir,
+        cuts={"video_tracks": [{"index": 1, "items": [
+            {
+                "id": "item_001", "name": "SlowMo",
+                "record_start_frame": 0, "record_end_frame": 200,
+                "source_start_frame": 0, "source_end_frame": 100,
+                "track_index": 1, "media_ref": "sha256:abc",
+                "speed": {"speed_percent": 50.0},
+            }
+        ]}]},
+        color={"grades": {}},
+        audio={"audio_tracks": []},
+        metadata={},
+        effects={},
+    )
+
+    issues = validate_project(project_dir)
+    speed_issues = [i for i in issues if i.category == "speed_duration"]
+    # 50% speed on 100-frame source = 200 record frames — this is correct
+    assert len(speed_issues) == 0
+
+
+def test_speed_duration_inconsistency(project_dir):
+    """A retimed clip with wrong record duration should warn."""
+    _write_domain_files(
+        project_dir,
+        cuts={"video_tracks": [{"index": 1, "items": [
+            {
+                "id": "item_001", "name": "BrokenSpeed",
+                "record_start_frame": 0, "record_end_frame": 100,
+                "source_start_frame": 0, "source_end_frame": 100,
+                "track_index": 1, "media_ref": "sha256:abc",
+                "speed": {"speed_percent": 50.0},
+            }
+        ]}]},
+        color={"grades": {}},
+        audio={"audio_tracks": []},
+        metadata={},
+        effects={},
+    )
+
+    issues = validate_project(project_dir)
+    speed_issues = [i for i in issues if i.category == "speed_duration"]
+    # 50% speed on 100-frame source should = 200 record frames, but we have 100
+    assert len(speed_issues) == 1
+    assert "50.0%" in speed_issues[0].message
+
+
+def test_speed_sync_mismatch(project_dir):
+    """Linked video and audio clips with different speeds should warn."""
+    _write_domain_files(
+        project_dir,
+        cuts={"video_tracks": [{"index": 1, "items": [
+            {
+                "id": "item_001", "name": "A",
+                "record_start_frame": 0, "record_end_frame": 100,
+                "source_start_frame": 0, "source_end_frame": 100,
+                "track_index": 1, "media_ref": "sha256:abc",
+                "speed": {"speed_percent": 200.0},
+            }
+        ]}]},
+        color={"grades": {}},
+        audio={"audio_tracks": [{"index": 1, "items": [
+            {
+                "id": "audio_001", "media_ref": "sha256:abc",
+                "start_frame": 0, "end_frame": 100,
+                "volume": 0, "pan": 0,
+            }
+        ]}]},
+        metadata={},
+        effects={},
+    )
+
+    issues = validate_project(project_dir)
+    sync_issues = [i for i in issues if i.category == "speed_sync"]
+    # Video has 200% speed, audio has default 100%
+    assert len(sync_issues) == 1
+    assert "200" in sync_issues[0].message

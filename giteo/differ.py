@@ -5,6 +5,7 @@ import os
 from typing import Dict, List, Optional, Tuple
 
 from .json_writer import read_json
+from .models import MOTION_EST_NAMES, RETIME_PROCESS_NAMES
 
 
 def _frames_to_timecode(frames: int, fps: float = 24.0) -> str:
@@ -101,7 +102,53 @@ def diff_cuts(old: dict, new: dict, fps: float = 24.0) -> List[str]:
                     f"  ~ clip '{new_item['name']}': {key} {old_v} → {new_v}"
                 )
 
+        # Check speed changes
+        lines.extend(_diff_speed(old_item, new_item, new_item["name"]))
+
     return lines
+
+
+def _diff_speed(old_item: dict, new_item: dict, clip_name: str) -> List[str]:
+    """Diff speed/retime properties between two clip versions."""
+    lines = []
+    old_speed = old_item.get("speed", {})
+    new_speed = new_item.get("speed", {})
+
+    old_pct = old_speed.get("speed_percent", 100.0)
+    new_pct = new_speed.get("speed_percent", 100.0)
+
+    if old_pct != new_pct:
+        old_label = _format_speed(old_pct)
+        new_label = _format_speed(new_pct)
+        lines.append(f"  ~ clip '{clip_name}': Speed {old_label} → {new_label}")
+
+    old_rt = old_speed.get("retime_process", 0)
+    new_rt = new_speed.get("retime_process", 0)
+    if old_rt != new_rt:
+        old_name = RETIME_PROCESS_NAMES.get(old_rt, f"unknown({old_rt})")
+        new_name = RETIME_PROCESS_NAMES.get(new_rt, f"unknown({new_rt})")
+        lines.append(f"  ~ clip '{clip_name}': Retime method {old_name} → {new_name}")
+
+    old_me = old_speed.get("motion_estimation", 0)
+    new_me = new_speed.get("motion_estimation", 0)
+    if old_me != new_me:
+        old_name = MOTION_EST_NAMES.get(old_me, f"unknown({old_me})")
+        new_name = MOTION_EST_NAMES.get(new_me, f"unknown({new_me})")
+        lines.append(
+            f"  ~ clip '{clip_name}': Motion estimation {old_name} → {new_name}"
+        )
+
+    return lines
+
+
+def _format_speed(pct: float) -> str:
+    """Format speed percentage as a human-friendly string."""
+    if pct == 100.0:
+        return "100% (normal)"
+    multiplier = pct / 100.0
+    if pct > 100:
+        return f"{pct}% ({multiplier:.2g}x fast)"
+    return f"{pct}% ({multiplier:.2g}x slow)"
 
 
 def _format_rgb(vals: list) -> str:
@@ -243,6 +290,7 @@ def diff_audio(old: dict, new: dict, fps: float = 24.0) -> List[str]:
                     lines.append(
                         f"  ~ audio '{item_id}': {key} {old_item.get(key)} → {item.get(key)}"
                     )
+            lines.extend(_diff_speed(old_item, item, item_id))
 
     for item_id in old_items:
         if item_id not in new_items:

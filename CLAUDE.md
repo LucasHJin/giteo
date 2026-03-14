@@ -141,7 +141,7 @@ my-video-project/                   # This IS the git repo
 ├── .giteo/
 │   └── config.json                 # Project config
 ├── timeline/
-│   ├── cuts.json                   # Clip placements, in/out points, tracks
+│   ├── cuts.json                   # Clip placements, in/out points, tracks, speed changes
 │   ├── color.json                  # Color grading data per clip
 │   ├── audio.json                  # Audio levels, effects
 │   ├── effects.json                # Video effects, transitions
@@ -161,7 +161,7 @@ Instead of one `timeline.json`, we split into files by editing domain. This is t
 
 | File | What it tracks | Who typically edits it |
 |------|---------------|----------------------|
-| `cuts.json` | Clip placements, in/out points, track assignments, transforms | Editor |
+| `cuts.json` | Clip placements, in/out points, track assignments, transforms, speed/retime | Editor |
 | `color.json` | Color grading data per clip | Colorist |
 | `audio.json` | Audio tracks, levels, panning | Sound designer |
 | `effects.json` | Video effects, transitions | Editor / VFX |
@@ -194,6 +194,13 @@ When Editor A changes `cuts.json` on `main` and Colorist B changes `color.json` 
             "ZoomX": 1.0,
             "ZoomY": 1.0,
             "Opacity": 100.0
+          },
+          "speed": {
+            "speed_percent": 50.0,
+            "retime_process": 3,
+            "retime_process_name": "optical_flow",
+            "motion_estimation": 4,
+            "motion_estimation_name": "enhanced_better"
           }
         }
       ]
@@ -342,6 +349,8 @@ Git's text-based merge works well when different people edit different domain fi
 | Audio/video sync | Editor trims clip in `cuts.json`; sound designer adjusted audio for the old length in `audio.json` | Merge succeeds but audio is out of sync with video |
 | Overlapping clips | Two editors add clips to same track at same timecode | Git may merge both additions into `cuts.json`, producing an invalid timeline |
 | Track count mismatch | One branch adds V3 track, another doesn't | `metadata.json` conflicts, but the structural issue is in `cuts.json` |
+| Speed/audio mismatch | Editor changes clip speed in `cuts.json`; sound designer adjusted audio for the old speed in `audio.json` | Merge succeeds but video/audio speed values diverge |
+| Speed/duration stale | Editor changes clip speed but a parallel branch modifies the same clip's duration | Merged record_end_frame doesn't match the speed-adjusted source duration |
 
 ### Merge Flow
 
@@ -446,6 +455,8 @@ Return the resolved JSON for each domain file.
   + Added clip 'B-Roll_Harbor.mov' on V2 at 00:00:10:00 (5s)
   - Removed clip 'Cutaway_003.mov' from V1
   ~ Trimmed 'Interview_A.mov' end: 00:00:30:00 → 00:00:28:12
+  ~ clip 'B-Roll_Harbor.mov': Speed 100% (normal) → 50% (0.5x slow)
+  ~ clip 'B-Roll_Harbor.mov': Retime method project_default → optical_flow
 
   COLOR:
   ~ clip 'Interview_A.mov': saturation 1.0 → 1.2
@@ -460,6 +471,25 @@ Return the resolved JSON for each domain file.
 ## Known Resolve API Limitations
 
 Reference: https://deric.github.io/DaVinciResolve-API-Docs/
+
+### Speed/Retime — Constant Speed Only
+
+The Resolve scripting API supports **constant speed changes** via `GetProperty`/`SetProperty`. Variable speed ramps (speed curves) are NOT accessible.
+
+| Method | Exists? | Notes |
+|--------|---------|-------|
+| `GetProperty("Speed")` | **Yes** | Read speed as percentage (100.0 = normal, 200.0 = 2x, 50.0 = half) |
+| `SetProperty("Speed", value)` | **Yes** | Set constant speed change |
+| `GetProperty("RetimeProcess")` | **Yes** | Read retime interpolation method (0=project, 1=nearest, 2=frame_blend, 3=optical_flow) |
+| `SetProperty("RetimeProcess", value)` | **Yes** | Set retime interpolation method |
+| `GetProperty("MotionEstimation")` | **Yes** | Read motion estimation quality (0=project, 1..5) |
+| `SetProperty("MotionEstimation", value)` | **Yes** | Set motion estimation quality |
+| Speed ramp / variable speed | **NO** | No API to read or write speed curves/keyframes |
+| Freeze frame | **NO** | No dedicated API; use `SetProperty("Speed", 0)` but behavior is undefined |
+
+**Current approach:** Serialize `Speed`, `RetimeProcess`, and `MotionEstimation` per clip via `GetProperty()`. Speed data is stored in `cuts.json` (video) and `audio.json` (audio) alongside each clip item. The `speed` object is only written when the clip is retimed (speed != 100%). On restore, speed is applied via `SetProperty("Speed", value)` after clips are placed on the timeline.
+
+**Merge behavior:** Speed changes live in `cuts.json`, so an editor changing speed on branch A while a colorist changes color on branch B will merge cleanly (different files). Post-merge validation catches mismatches between video speed and linked audio speed.
 
 ### Color — Write-Only API
 

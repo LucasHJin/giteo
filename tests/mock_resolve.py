@@ -55,6 +55,9 @@ class MockTimelineItem:
             "Volume": 0.0,
             "Contrast": 1.0,
             "Saturation": 1.0,
+            "Speed": 100.0,
+            "RetimeProcess": 0,
+            "MotionEstimation": 0,
         }
         self._num_nodes = num_nodes
         self._node_labels = node_labels or {}  # {node_index: label}
