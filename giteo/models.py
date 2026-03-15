@@ -408,12 +408,16 @@ class ColorNodeGrade:
     hue: Optional[float] = None
     color_boost: Optional[float] = None
 
+    # Tool names in this node (e.g., ["Primary Offset"]) — for change detection
+    tools: Optional[List[str]] = None
+
     def to_dict(self) -> dict:
         d: dict = {"index": self.index, "label": self.label, "lut": self.lut}
         # Only include color values that were actually read (not None)
         for key in ["slope", "offset", "power", "saturation",
                      "lift", "gamma", "gain", "color_offset",
-                     "contrast", "pivot", "hue", "color_boost"]:
+                     "contrast", "pivot", "hue", "color_boost",
+                     "tools"]:
             val = getattr(self, key)
             if val is not None:
                 d[key] = val
@@ -437,6 +441,7 @@ class ColorNodeGrade:
             pivot=d.get("pivot"),
             hue=d.get("hue"),
             color_boost=d.get("color_boost"),
+            tools=d.get("tools"),
         )
 
 

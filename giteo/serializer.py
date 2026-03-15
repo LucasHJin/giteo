@@ -434,12 +434,9 @@ def _frame_to_tc(frame: int, start_frame: int, start_tc: str, fps: float) -> str
 def _read_color_adjustments(clip) -> dict:
     """Read clip-level color adjustments via GetProperty().
 
-    The Resolve scripting API is write-only for per-node color data
-    (SetCDL exists but GetCDL does not, SetLUT exists but GetLUT does not).
-
-    However, clip-level properties like Contrast and Saturation may be
-    readable via GetProperty() — this is not officially documented but
-    works in some Resolve versions.
+    NOTE: On Resolve Free, GetProperty() for color properties (Contrast,
+    Saturation, etc.) returns None. These values are only readable on
+    Resolve Studio. The function still tries in case the user has Studio.
     """
     adjustments = {}
 
@@ -466,27 +463,36 @@ def _read_color_adjustments(clip) -> dict:
 def _read_clip_grade_info(clip) -> Tuple[int, List[ColorNodeGrade], str]:
     """Read color grade info from a Resolve clip.
 
-    The Resolve scripting API is largely write-only for color:
-    - SetCDL() exists but GetCDL() does NOT
-    - SetLUT() exists but GetLUT() does NOT
-    - GetNumNodes() / GetNodeLabel() are undocumented but may work
-
-    What we CAN read:
-    1. Node count & labels (undocumented, try with fallback)
-    2. Clip-level properties like Contrast/Saturation via GetProperty()
-    3. Full grade via DRX still export (handled separately in _export_grade_stills)
+    Captures what the scripting API exposes (read-only access is limited):
+    - Node count and structure via GetNumNodes() / GetNodeGraph()
+    - Node labels and LUT paths via NodeGraph.GetNodeLabel/GetLUT
+    - Tool names per node via NodeGraph.GetToolsInNode (change detection)
+    - Clip-level adjustments via GetProperty (Studio only)
+    - Full grade via DRX still export (Studio only, in _export_grade_stills)
     """
     num_nodes = 1
     nodes: List[ColorNodeGrade] = []
     version_name = ""
+    node_graph = None
 
-    # GetNumNodes() is undocumented but works in many Resolve versions
+    # Prefer NodeGraph API (available in Resolve 18+)
     try:
-        n = clip.GetNumNodes()
-        if n:
-            num_nodes = int(n)
+        node_graph = clip.GetNodeGraph()
+        if node_graph:
+            n = node_graph.GetNumNodes()
+            if n:
+                num_nodes = int(n)
     except (AttributeError, TypeError):
         pass
+
+    # Fallback to clip-level GetNumNodes
+    if num_nodes <= 1 and not node_graph:
+        try:
+            n = clip.GetNumNodes()
+            if n:
+                num_nodes = int(n)
+        except (AttributeError, TypeError):
+            pass
 
     # Read clip-level color adjustments via GetProperty()
     clip_adjustments = _read_color_adjustments(clip)
@@ -494,18 +500,37 @@ def _read_clip_grade_info(clip) -> Tuple[int, List[ColorNodeGrade], str]:
     for node_idx in range(1, num_nodes + 1):
         label = ""
         lut = ""
-        # GetNodeLabel() is undocumented but may work
-        try:
-            label = clip.GetNodeLabel(node_idx) or ""
-        except (AttributeError, TypeError):
-            pass
-        # GetLUT() is NOT in the official API — try anyway
-        try:
-            lut = clip.GetLUT(node_idx) or ""
-        except (AttributeError, TypeError):
-            pass
+        tools = []
 
-        node = ColorNodeGrade(index=node_idx, label=label, lut=lut)
+        # Read from NodeGraph API first (more reliable)
+        if node_graph:
+            try:
+                label = node_graph.GetNodeLabel(node_idx) or ""
+            except (AttributeError, TypeError):
+                pass
+            try:
+                lut = node_graph.GetLUT(node_idx) or ""
+            except (AttributeError, TypeError):
+                pass
+            try:
+                t = node_graph.GetToolsInNode(node_idx)
+                if t and isinstance(t, list):
+                    tools = t
+            except (AttributeError, TypeError):
+                pass
+        else:
+            # Fallback to clip-level APIs
+            try:
+                label = clip.GetNodeLabel(node_idx) or ""
+            except (AttributeError, TypeError):
+                pass
+            try:
+                lut = clip.GetLUT(node_idx) or ""
+            except (AttributeError, TypeError):
+                pass
+
+        node = ColorNodeGrade(index=node_idx, label=label, lut=lut,
+                              tools=tools if tools else None)
 
         # Clip-level adjustments go on the first node
         if node_idx == 1 and clip_adjustments:
@@ -535,6 +560,11 @@ def _export_grade_stills(timeline, project, project_dir: str,
     DRX (DaVinci Resolve eXchange) files contain the complete color grade:
     all nodes, CDL values, curves, qualifiers, power windows, etc.
     Git tracks them as binary — any color change = different file = detected.
+
+    NOTE: ExportStills requires DaVinci Resolve Studio. On the Free edition
+    the method exists but always returns False. When that happens we fall
+    back to the metadata-only color capture (node structure, LUTs, clip
+    adjustments) which is handled by _serialize_color.
     """
     grades_dir = os.path.join(project_dir, "timeline", "grades")
     os.makedirs(grades_dir, exist_ok=True)
@@ -558,8 +588,6 @@ def _export_grade_stills(timeline, project, project_dir: str,
         pass
 
     if not album:
-        print("  Warning: Could not access Gallery — DRX grade export skipped.")
-        print("  (Color grades will be tracked by node structure only.)")
         return
 
     fps = float(timeline.GetSetting("timelineFrameRate") or 24)
@@ -575,6 +603,8 @@ def _export_grade_stills(timeline, project, project_dir: str,
         except (AttributeError, TypeError):
             pass
 
+    drx_export_works = None  # tri-state: None=untested, True/False
+
     track_count = timeline.GetTrackCount("video")
 
     for track_idx in range(1, track_count + 1):
@@ -583,6 +613,9 @@ def _export_grade_stills(timeline, project, project_dir: str,
             continue
 
         for i, clip in enumerate(clips):
+            if drx_export_works is False:
+                break  # skip remaining clips once we know it's broken
+
             item_id = f"item_{track_idx:03d}_{i:03d}"
             try:
                 clip_start = clip.GetStart()
@@ -601,7 +634,6 @@ def _export_grade_stills(timeline, project, project_dir: str,
 
                 still = timeline.GrabStill()
                 if not still:
-                    print(f"  Warning: GrabStill returned None for {item_id}")
                     continue
 
                 time.sleep(0.1)
@@ -609,23 +641,28 @@ def _export_grade_stills(timeline, project, project_dir: str,
                 success = album.ExportStills([still], grades_dir, drx_name, "drx")
 
                 if success:
-                    # Find the exported file (Resolve may add suffixes)
                     exported = [f for f in os.listdir(grades_dir)
                                 if f.startswith(drx_name) and f.endswith(".drx")]
                     if exported:
                         grades[item_id].drx_file = exported[0]
                     else:
                         grades[item_id].drx_file = f"{drx_name}.drx"
+                    if drx_export_works is None:
+                        drx_export_works = True
                 else:
-                    print(f"  Warning: ExportStills failed for {item_id}")
+                    if drx_export_works is None:
+                        # First failure — ExportStills is not available
+                        drx_export_works = False
+                        print("  Note: DRX export unavailable (Resolve Studio required).")
+                        print("  Color tracked via node structure and clip properties.")
 
                 try:
                     album.DeleteStills([still])
                 except (AttributeError, TypeError):
                     pass
 
-            except Exception as e:
-                print(f"  Warning: DRX export failed for {item_id}: {e}")
+            except Exception:
+                pass
 
     if saved_page and resolve_app:
         try:

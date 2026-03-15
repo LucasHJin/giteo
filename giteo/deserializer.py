@@ -1381,8 +1381,10 @@ def restore_timeline_overlays(timeline, project_dir: str, resolve_app=None) -> N
     """Apply color grades and markers onto the current timeline without rebuilding clips."""
     color_grades = _load_color(project_dir)
     markers = _load_markers(project_dir)
+    video_tracks = _load_cuts(project_dir)
 
-    _apply_color(timeline, color_grades, project_dir, resolve_app=resolve_app)
+    _apply_color(timeline, color_grades, project_dir, resolve_app=resolve_app,
+                 video_tracks=video_tracks)
     _clear_markers(timeline)
     _apply_markers(timeline, markers)
 
