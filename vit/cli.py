@@ -411,12 +411,20 @@ def _resolve_menu_name(script_name: str) -> str:
 
 def cmd_install_resolve(args):
     """Install Resolve plugin scripts via symlink."""
-    # Find the resolve_plugin directory relative to this package
+    # Find the resolve_plugin directory — check multiple locations
     package_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     plugin_dir = os.path.join(package_dir, "resolve_plugin")
 
     if not os.path.isdir(plugin_dir):
-        print(f"  Error: resolve_plugin/ directory not found at {plugin_dir}")
+        # Fallback: check ~/.vit/vit-src/ (curl installer location)
+        plugin_dir = os.path.join(
+            os.path.expanduser("~"), ".vit", "vit-src", "resolve_plugin"
+        )
+
+    if not os.path.isdir(plugin_dir):
+        print(f"  Error: resolve_plugin/ directory not found.")
+        print(f"  Checked: {os.path.join(package_dir, 'resolve_plugin')}")
+        print(f"  Checked: {plugin_dir}")
         sys.exit(1)
 
     os.makedirs(RESOLVE_SCRIPTS_DIR, exist_ok=True)
