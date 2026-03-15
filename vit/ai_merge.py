@@ -827,3 +827,96 @@ def classify_commit_type(
     except Exception:
         from .core import categorize_commit
         return categorize_commit(files_changed)
+
+
+# -- VIT CLI: AI Commit Message Suggestion ------------------------------------
+
+COMMIT_MESSAGE_PROMPT = """\
+You are a video editing version control assistant. Based on the timeline changes below, \
+write a short, descriptive commit message (1 line, max 72 characters).
+
+Use video editing terminology. Focus on WHAT changed, not technical details.
+Do NOT include prefixes like "vit:" or "feat:".
+
+Examples of good messages:
+- "Add B-roll on V2, trim interview end point"
+- "Color grade interview clips, boost saturation"
+- "Adjust dialogue levels, pan ambient to rear"
+- "Add marker notes for review session"
+
+Timeline changes:
+{diff_text}
+
+Return ONLY the commit message text, nothing else.
+"""
+
+
+def suggest_commit_message(diff_text: str) -> Optional[str]:
+    """Use Gemini to suggest a commit message based on timeline diff.
+
+    Args:
+        diff_text: Human-readable diff output from differ.py
+
+    Returns:
+        Suggested commit message string, or None if AI unavailable.
+    """
+    if not diff_text or not diff_text.strip():
+        return None
+
+    try:
+        model = _get_genai_model("You are a video editing commit message writer.")
+    except (ImportError, ValueError):
+        return None
+
+    prompt = COMMIT_MESSAGE_PROMPT.format(diff_text=diff_text[:2000])
+
+    try:
+        response = model.generate_content(prompt)
+        message = response.text.strip().strip('"').strip("'")
+        # Enforce max length
+        if len(message) > 72:
+            message = message[:69] + "..."
+        return message
+    except Exception:
+        return None
+
+
+# -- VIT CLI: AI Log Summary --------------------------------------------------
+
+LOG_SUMMARY_PROMPT = """\
+You are a video editing version control assistant. Summarize these recent commits \
+into a brief natural-language overview (2-3 sentences max) for a video editing team.
+
+Use video editing terminology. Group related work together.
+
+Commits (newest first):
+{commits_text}
+
+Return ONLY the summary text, nothing else.
+"""
+
+
+def summarize_log(commits_text: str) -> Optional[str]:
+    """Use Gemini to summarize recent commit history.
+
+    Args:
+        commits_text: Formatted git log output
+
+    Returns:
+        Natural language summary, or None if AI unavailable.
+    """
+    if not commits_text or not commits_text.strip():
+        return None
+
+    try:
+        model = _get_genai_model("You are a video editing project summarizer.")
+    except (ImportError, ValueError):
+        return None
+
+    prompt = LOG_SUMMARY_PROMPT.format(commits_text=commits_text[:3000])
+
+    try:
+        response = model.generate_content(prompt)
+        return response.text.strip()
+    except Exception:
+        return None

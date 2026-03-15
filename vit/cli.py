@@ -81,7 +81,30 @@ def cmd_commit(args):
 
     git_add(project_dir, ["timeline/", "assets/", ".vit/", ".gitignore"])
 
-    message = args.message or "vit: save version"
+    message = args.message
+    if not message:
+        # Try AI-suggested commit message
+        try:
+            from .differ import diff_from_project
+            diff_text = diff_from_project(project_dir)
+            if diff_text.strip():
+                from .ai_merge import suggest_commit_message
+                suggestion = suggest_commit_message(diff_text)
+                if suggestion:
+                    print(f'  AI suggested: "{suggestion}"')
+                    response = input("  Use this message? [Y/n/edit]: ").strip().lower()
+                    if response in ("", "y", "yes"):
+                        message = suggestion
+                    elif response in ("n", "no"):
+                        message = None  # will fall through to default
+                    else:
+                        # User typed a custom message
+                        message = response
+        except Exception:
+            pass  # Fall through to default
+        if not message:
+            message = "vit: save version"
+
     try:
         commit_hash = git_commit(project_dir, message)
         print(f"  Committed: {message}")
@@ -139,6 +162,35 @@ def cmd_merge(args):
         except GitError as e:
             if "nothing to commit" not in str(e):
                 raise
+
+    # Pre-merge AI analysis
+    if not args.no_ai:
+        try:
+            from .differ import get_branch_diff_by_category
+            from .ai_merge import analyze_branch_comparison
+            changes_ours, changes_theirs = get_branch_diff_by_category(
+                project_dir, current, branch
+            )
+            has_changes = any(changes_ours.values()) or any(changes_theirs.values())
+            if has_changes:
+                print(f"  Analyzing merge of '{branch}' into '{current}'...")
+                analysis = analyze_branch_comparison(
+                    current, branch, changes_ours, changes_theirs
+                )
+                rec = analysis.get("recommendation", "manual_review")
+                explanation = analysis.get("explanation", "")
+                conflicts = analysis.get("conflicts", [])
+                if conflicts:
+                    print(f"  ⚠ Potential conflicts: {', '.join(conflicts)}")
+                if explanation:
+                    print(f"  Analysis: {explanation}")
+                if rec == "manual_review":
+                    response = input("  Proceed with merge? [Y/n]: ").strip().lower()
+                    if response in ("n", "no"):
+                        print("  Merge cancelled.")
+                        return
+        except Exception:
+            pass  # Skip analysis on any failure
 
     print(f"  Merging '{branch}' into '{current}'...")
 
@@ -315,6 +367,16 @@ def cmd_log(args):
     output = git_log(project_dir, max_count=count)
     if output:
         print(output)
+        if args.summary:
+            try:
+                from .ai_merge import summarize_log
+                summary = summarize_log(output)
+                if summary:
+                    print(f"\n  AI Summary: {summary}")
+                else:
+                    print("\n  AI summary unavailable (check GEMINI_API_KEY).")
+            except Exception:
+                print("\n  AI summary unavailable.")
     else:
         print("  No commits yet.")
 
@@ -536,6 +598,7 @@ def main():
     # log
     p_log = subparsers.add_parser("log", help="Show version history")
     p_log.add_argument("-n", "--count", type=int, help="Max entries (default: 20)")
+    p_log.add_argument("--summary", action="store_true", help="Show AI summary of recent commits")
     p_log.set_defaults(func=cmd_log)
 
     # status
