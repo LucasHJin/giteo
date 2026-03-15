@@ -1142,7 +1142,8 @@ def _apply_clip_adjustments(clip, node: ColorNodeGrade) -> None:
 
 
 def _apply_color(timeline, color_grades: Dict[str, ColorGrade],
-                 project_dir: str = "", resolve_app=None) -> None:
+                 project_dir: str = "", resolve_app=None,
+                 video_tracks: List[VideoTrack] = None) -> None:
     """Apply color grading data to clips on the timeline.
 
     Restore priority:
@@ -1150,6 +1151,10 @@ def _apply_color(timeline, color_grades: Dict[str, ColorGrade],
     2. CDL values via SetCDL() (if present in JSON)
     3. Clip-level adjustments via SetProperty() (contrast, saturation, etc.)
     4. LUT paths via SetLUT()
+
+    When video_tracks is provided, uses the stored item IDs for grade lookup
+    instead of deriving IDs from clip position (which can mismatch after
+    generators are inserted at different positions during rebuild).
     """
     grades_dir = os.path.join(project_dir, "timeline", "grades") if project_dir else ""
     saved_page = None
@@ -1163,6 +1168,14 @@ def _apply_color(timeline, color_grades: Dict[str, ColorGrade],
         except (AttributeError, TypeError):
             saved_page = None
 
+    # Build a per-track list of item IDs from video_tracks data (if available).
+    # This ensures we use the original item IDs rather than positional ones,
+    # which can drift when generators are re-inserted during rebuild.
+    track_item_ids: Dict[int, List[str]] = {}
+    if video_tracks:
+        for track in video_tracks:
+            track_item_ids[track.index] = [item.id for item in track.items]
+
     try:
         track_count = timeline.GetTrackCount("video")
         for track_idx in range(1, track_count + 1):
@@ -1170,8 +1183,13 @@ def _apply_color(timeline, color_grades: Dict[str, ColorGrade],
             if not clips:
                 continue
 
+            item_ids = track_item_ids.get(track_idx)
+
             for i, clip in enumerate(clips):
-                item_id = f"item_{track_idx:03d}_{i:03d}"
+                if item_ids and i < len(item_ids):
+                    item_id = item_ids[i]
+                else:
+                    item_id = f"item_{track_idx:03d}_{i:03d}"
                 grade = color_grades.get(item_id)
                 if not grade:
                     continue
@@ -1342,7 +1360,8 @@ def deserialize_timeline(timeline, project, project_dir: str, resolve_app=None) 
     _apply_video_speed(new_timeline, video_tracks)
     _apply_audio_speed(new_timeline, audio_tracks)
     _apply_extended_video_properties(new_timeline, video_tracks)
-    _apply_color(new_timeline, color_grades, project_dir, resolve_app=resolve_app)
+    _apply_color(new_timeline, color_grades, project_dir, resolve_app=resolve_app,
+                 video_tracks=video_tracks)
     _apply_markers(new_timeline, markers)
 
     # Phase 5: Rename (AFTER all population is done)
