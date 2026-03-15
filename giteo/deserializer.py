@@ -3,11 +3,12 @@
 Reads the JSON files and applies the state back to a Resolve timeline.
 """
 
+import hashlib
 import os
 import time
 from typing import Dict, List
 
-from .json_writer import read_json
+from .json_writer import read_all_domain_files, read_json
 from .models import (
     AudioItem,
     AudioTrack,
@@ -15,6 +16,7 @@ from .models import (
     ColorNodeGrade,
     Marker,
     SpeedChange,
+    TextProperties,
     TimelineMetadata,
     Transform,
     VideoItem,
@@ -65,6 +67,53 @@ def _load_metadata(project_dir: str) -> TimelineMetadata:
 def _load_manifest(project_dir: str) -> dict:
     """Load asset manifest."""
     return read_json(os.path.join(project_dir, "assets", "manifest.json"))
+
+
+def _snapshot_relative_files(project_dir: str, relative_dir: str) -> dict:
+    """Capture file content hashes for a project subdirectory."""
+    root = os.path.join(project_dir, relative_dir)
+    if not os.path.isdir(root):
+        return {}
+
+    snapshot = {}
+    for dirpath, _, filenames in os.walk(root):
+        for filename in sorted(filenames):
+            filepath = os.path.join(dirpath, filename)
+            relpath = os.path.relpath(filepath, project_dir)
+            with open(filepath, "rb") as f:
+                snapshot[relpath] = hashlib.sha1(f.read()).hexdigest()
+    return snapshot
+
+
+def capture_restore_state(project_dir: str) -> dict:
+    """Capture merge restore inputs that affect whether a full rebuild is needed."""
+    return {
+        "domains": read_all_domain_files(project_dir),
+        "generators": _snapshot_relative_files(
+            project_dir, os.path.join("timeline", "generators")
+        ),
+    }
+
+
+def should_restore_overlays_only(before_state: dict, after_state: dict) -> bool:
+    """Return True only when a merge changed color/markers and nothing else.
+
+    Title/generator restores depend on both `cuts.json` and sidecar `.comp`
+    files under `timeline/generators/`, so generator changes must force a
+    full timeline rebuild even if the structural JSON domains are unchanged.
+    """
+    non_overlay_domains = ("cuts", "audio", "effects", "metadata", "manifest")
+    before_domains = before_state.get("domains", {})
+    after_domains = after_state.get("domains", {})
+
+    domains_unchanged = all(
+        before_domains.get(domain, {}) == after_domains.get(domain, {})
+        for domain in non_overlay_domains
+    )
+    generators_unchanged = (
+        before_state.get("generators", {}) == after_state.get("generators", {})
+    )
+    return domains_unchanged and generators_unchanged
 
 
 def _apply_metadata(timeline, project, metadata: TimelineMetadata) -> None:
@@ -218,6 +267,11 @@ def _collect_video_clip_infos(media_pool, video_tracks: List[VideoTrack],
     When multiple clips share the same source file (split clips), each
     additional clip gets a freshly-imported mediaPoolItem. Without this,
     Resolve silently deduplicates and only places the first clip.
+    Skips generator items (Text+, etc.) — those are handled separately
+    via InsertFusionGeneratorIntoTimeline after media clips are placed.
+
+    Uses only the documented clip info keys (mediaPoolItem, startFrame,
+    endFrame) to avoid undefined behavior from undocumented parameters.
     """
     clip_infos = []
     seen_refs = set()
@@ -233,6 +287,9 @@ def _collect_video_clip_infos(media_pool, video_tracks: List[VideoTrack],
                 pool_item = _find_media_pool_item(media_pool, manifest, item.media_ref)
                 seen_refs.add(item.media_ref)
 
+            if item.is_generator:
+                continue
+            pool_item = _find_media_pool_item(media_pool, manifest, item.media_ref)
             if not pool_item:
                 print(f"  Warning: Could not find media for '{item.name}' ({item.media_ref})")
                 continue
@@ -310,6 +367,8 @@ def _clear_markers(timeline) -> None:
 def _apply_video_tracks(timeline, media_pool, video_tracks: List[VideoTrack], manifest: dict) -> None:
     """Apply video track items to the Resolve timeline via AppendToTimeline.
 
+    Skips generator items — those are handled by _apply_generators.
+
     This is the FALLBACK path used only when CreateTimelineFromClips fails.
     The caller must ensure the timeline is confirmed as current before calling.
 
@@ -325,6 +384,8 @@ def _apply_video_tracks(timeline, media_pool, video_tracks: List[VideoTrack], ma
 
         clip_infos = []
         for item in track.items:
+            if item.is_generator:
+                continue
             pool_item = _find_media_pool_item(media_pool, manifest, item.media_ref)
             if not pool_item:
                 print(f"  Warning: Could not find media for '{item.name}' ({item.media_ref})")
@@ -409,6 +470,405 @@ def _apply_audio_tracks(timeline, media_pool, audio_tracks: List[AudioTrack],
                     pass
 
 
+def _insert_fusion_item(timeline, item):
+    """Insert a Fusion title or generator into the timeline.
+
+    Resolve has separate APIs:
+      - InsertFusionTitleIntoTimeline — for Titles (Text+, Text, Scroll)
+      - InsertFusionGeneratorIntoTimeline — for Generators (Solid Color)
+      - InsertOFXGeneratorIntoTimeline — for OFX-based generators
+
+    Tries the most likely API first based on item_type, then falls back.
+    Returns the inserted TimelineItem, or None on failure.
+
+    NOTE: All three APIs insert on V1 at the playhead position regardless
+    of the original track. There is no API to control target track.
+    """
+    name = item.generator_name or "Text+"
+
+    if item.is_title:
+        apis = [
+            "InsertFusionTitleIntoTimeline",
+            "InsertFusionGeneratorIntoTimeline",
+            "InsertOFXGeneratorIntoTimeline",
+        ]
+    else:
+        apis = [
+            "InsertFusionGeneratorIntoTimeline",
+            "InsertFusionTitleIntoTimeline",
+            "InsertOFXGeneratorIntoTimeline",
+        ]
+
+    for api_name in apis:
+        fn = getattr(timeline, api_name, None)
+        if not callable(fn):
+            continue
+        try:
+            result = fn(name)
+            if result:
+                print(f"  Inserted '{name}' via {api_name}")
+                # These APIs return a TimelineItem in Resolve 18+.
+                # Older versions may return True. In that case, fall
+                # through to the caller's search logic.
+                if result is True:
+                    return True
+                return result
+        except (AttributeError, TypeError):
+            continue
+
+    return None
+
+
+def _set_playhead(timeline, frame: int) -> None:
+    """Move the playhead to a specific frame before inserting a generator."""
+    try:
+        fps = float(timeline.GetSetting("timelineFrameRate") or 24)
+        start_frame = timeline.GetStartFrame()
+        start_tc = timeline.GetStartTimecode() or "01:00:00:00"
+        tc = _frame_to_tc(frame, start_frame, start_tc, fps)
+        timeline.SetCurrentTimecode(tc)
+        time.sleep(0.15)
+        for _ in range(3):
+            if timeline.GetCurrentTimecode() == tc:
+                break
+            timeline.SetCurrentTimecode(tc)
+            time.sleep(0.15)
+    except (AttributeError, TypeError, ValueError):
+        pass
+
+
+def _restore_text_via_fusion(clip, text_props) -> bool:
+    """Set text properties on an inserted clip via its Fusion composition.
+
+    Fallback for when ImportFusionComp doesn't work. Tries to find
+    any text-related tool (TextPlus, Text3D, etc.) and set properties.
+    """
+    if not text_props:
+        return False
+    try:
+        comp_count = clip.GetFusionCompCount()
+        if not comp_count or comp_count < 1:
+            return False
+        comp = clip.GetFusionCompByIndex(1)
+        if not comp:
+            return False
+
+        tools = comp.GetToolList() or {}
+        text_tool = None
+        if isinstance(tools, dict):
+            for tool in tools.values():
+                try:
+                    reg_id = (tool.GetAttrs() or {}).get("TOOLS_RegID", "")
+                    if reg_id in ("TextPlus", "Text3D", "StyledText"):
+                        text_tool = tool
+                        break
+                except (AttributeError, TypeError):
+                    continue
+            if not text_tool:
+                text_tool = list(tools.values())[0] if tools else None
+
+        if not text_tool:
+            return False
+
+        if text_props.styled_text:
+            text_tool.SetInput("StyledText", text_props.styled_text)
+        if text_props.font:
+            text_tool.SetInput("Font", text_props.font)
+        if text_props.size > 0:
+            text_tool.SetInput("Size", text_props.size)
+        if text_props.bold:
+            text_tool.SetInput("Bold", 1)
+        if text_props.italic:
+            text_tool.SetInput("Italic", 1)
+        if text_props.color:
+            text_tool.SetInput("Red1", text_props.color.get("r", 1.0))
+            text_tool.SetInput("Green1", text_props.color.get("g", 1.0))
+            text_tool.SetInput("Blue1", text_props.color.get("b", 1.0))
+
+        print(f"  Set text properties via Fusion comp: "
+              f"'{text_props.styled_text[:30]}'")
+        return True
+    except (AttributeError, TypeError) as e:
+        print(f"  Warning: Could not set text via Fusion: {e}")
+        return False
+
+
+def _make_transparent_png() -> bytes:
+    """Generate a minimal 1x1 transparent RGBA PNG (no dependencies)."""
+    import struct
+    import zlib
+
+    def _chunk(ctype, data):
+        c = ctype + data
+        crc = struct.pack('>I', zlib.crc32(c) & 0xFFFFFFFF)
+        return struct.pack('>I', len(data)) + c + crc
+
+    sig = b'\x89PNG\r\n\x1a\n'
+    ihdr = _chunk(b'IHDR', struct.pack('>IIBBBBB', 1, 1, 8, 6, 0, 0, 0))
+    idat = _chunk(b'IDAT', zlib.compress(b'\x00\x00\x00\x00\x00'))
+    iend = _chunk(b'IEND', b'')
+    return sig + ihdr + idat + iend
+
+
+def _try_v2_placement(timeline, media_pool, item, project_dir,
+                       generators_dir) -> "TimelineItem | None":
+    """Place a generator on V2+ using a transparent image + AppendToTimeline.
+
+    InsertFusionTitleIntoTimeline always targets V1. The only way to get
+    a clip on V2 is via AppendToTimeline with trackIndex, which requires
+    a media pool item. We create a 1x1 transparent PNG, import it, place
+    it on the target track, then ImportFusionComp to add the text overlay.
+
+    Uses recordFrame to position the clip at the correct timecode. The
+    previous clip shrinkage was caused by a source/timeline FPS mismatch
+    in the serializer, not by recordFrame.
+
+    Returns the placed TimelineItem, or None if any step fails.
+    """
+    target_track = item.track_index
+    if target_track < 1:
+        target_track = 1
+
+    temp_dir = os.path.join(project_dir, ".giteo", "temp")
+    os.makedirs(temp_dir, exist_ok=True)
+    png_path = os.path.join(temp_dir, f"placeholder_{item.id}.png")
+
+    try:
+        with open(png_path, 'wb') as f:
+            f.write(_make_transparent_png())
+    except OSError:
+        return None
+
+    pool_items = None
+    try:
+        pool_items = media_pool.ImportMedia([png_path])
+    except (AttributeError, TypeError):
+        pass
+
+    if not pool_items:
+        return None
+
+    pool_item = pool_items[0]
+
+    while timeline.GetTrackCount("video") < target_track:
+        timeline.AddTrack("video")
+
+    duration = max(item.record_end_frame - item.record_start_frame, 1)
+
+    appended = None
+    try:
+        appended = media_pool.AppendToTimeline([{
+            "mediaPoolItem": pool_item,
+            "startFrame": 0,
+            "endFrame": duration,
+            "trackIndex": target_track,
+            "recordFrame": item.record_start_frame,
+        }])
+    except (AttributeError, TypeError):
+        pass
+
+    if not appended:
+        return None
+
+    clip = appended[0] if isinstance(appended, list) else appended
+    if not clip:
+        return None
+
+    time.sleep(0.3)
+
+    comp_imported = False
+    if item.fusion_comp_file:
+        comp_path = os.path.join(generators_dir, item.fusion_comp_file)
+        if os.path.exists(comp_path):
+            try:
+                imported_comp = clip.ImportFusionComp(comp_path)
+                if imported_comp:
+                    comp_imported = True
+                    try:
+                        comp_names = clip.GetFusionCompNameList() or []
+                        if len(comp_names) > 1:
+                            clip.LoadFusionCompByName(comp_names[-1])
+                    except (AttributeError, TypeError):
+                        pass
+                    print(f"  Placed '{item.generator_name}' on V{target_track} "
+                          f"with Fusion comp")
+            except (AttributeError, TypeError):
+                pass
+
+    if not comp_imported and item.text_properties:
+        _restore_text_via_fusion(clip, item.text_properties)
+
+    return clip
+
+
+def _find_inserted_clip(timeline, result):
+    """Resolve the TimelineItem from an insert API's return value.
+
+    InsertFusionTitleIntoTimeline returns a TimelineItem in Resolve 18+
+    but may return True in older versions. When we only get True, scan
+    V1 (titles always land on V1) for the last clip.
+    """
+    if result and result is not True:
+        return result
+
+    try:
+        clips = timeline.GetItemListInTrack("video", 1)
+        if clips:
+            return clips[-1]
+    except (AttributeError, TypeError):
+        pass
+    return None
+
+
+def _get_v1_end_frame(timeline) -> int:
+    """Find the frame after the last clip on V1.
+
+    Falls back to timeline start frame if V1 is empty.
+    """
+    end = 0
+    try:
+        clips = timeline.GetItemListInTrack("video", 1)
+        if clips:
+            for c in clips:
+                clip_end = c.GetEnd() or 0
+                if clip_end > end:
+                    end = clip_end
+    except (AttributeError, TypeError):
+        pass
+    if end == 0:
+        try:
+            end = timeline.GetStartFrame() or 0
+        except (AttributeError, TypeError):
+            pass
+    return end
+
+
+def _apply_generators(timeline, video_tracks: List[VideoTrack],
+                      project_dir: str, media_pool=None) -> None:
+    """Insert generator/text clips and restore their Fusion compositions.
+
+    Strategy for track placement:
+    - V2+ items: Use transparent PNG + AppendToTimeline(trackIndex=N)
+      to place directly on the correct track as an overlay.
+    - V1 items (or V2 fallback): Insert at end of V1 to avoid pushing
+      existing clips, with manual drag instructions.
+
+    For each generator/title item:
+    1. Try V2+ placement via transparent image if target track > 1
+    2. Fall back to end-of-V1 insertion if that fails
+    3. Import Fusion comp / set text properties
+    4. Apply transform
+    """
+    generators_dir = os.path.join(project_dir, "timeline", "generators")
+
+    generators = [(track, item)
+                   for track in video_tracks
+                   for item in track.items
+                   if item.is_generator]
+
+    # For items from old saves that lack fusion_comp_file, try to find
+    # a .comp file by item ID (it may have been committed separately).
+    for _track, item in generators:
+        if not item.fusion_comp_file:
+            candidate = f"{item.id}.comp"
+            if os.path.exists(os.path.join(generators_dir, candidate)):
+                item.fusion_comp_file = candidate
+
+    if not generators:
+        return
+
+    print(f"  Restoring {len(generators)} generator/title clip(s)...")
+
+    fps = float(timeline.GetSetting("timelineFrameRate") or 24)
+    start_frame = timeline.GetStartFrame() or 0
+    start_tc = timeline.GetStartTimecode() or "01:00:00:00"
+
+    manual_steps = []
+
+    for track, item in generators:
+        inserted_clip = None
+        needs_manual_move = False
+
+        # Strategy 1: V2+ placement via transparent PNG + AppendToTimeline
+        # with recordFrame to position at the correct timecode.
+        if track.index > 1 and media_pool:
+            inserted_clip = _try_v2_placement(
+                timeline, media_pool, item, project_dir, generators_dir)
+
+        # Strategy 2: Fall back to V1 insertion at end of timeline
+        if not inserted_clip:
+            end_frame = _get_v1_end_frame(timeline)
+            _set_playhead(timeline, end_frame)
+
+            result = _insert_fusion_item(timeline, item)
+            if not result:
+                print(f"  WARNING: Could not insert '{item.generator_name}' "
+                      f"for {item.id} — tried all available APIs")
+                continue
+
+            time.sleep(0.3)
+
+            inserted_clip = _find_inserted_clip(timeline, result)
+            if not inserted_clip:
+                print(f"  WARNING: Insert returned success but could not "
+                      f"locate clip for {item.id}")
+                continue
+
+            comp_imported = False
+            if item.fusion_comp_file:
+                comp_path = os.path.join(generators_dir, item.fusion_comp_file)
+                if os.path.exists(comp_path):
+                    try:
+                        import_result = inserted_clip.ImportFusionComp(comp_path)
+                        if import_result:
+                            comp_imported = True
+                    except (AttributeError, TypeError):
+                        pass
+
+            if not comp_imported and item.text_properties:
+                _restore_text_via_fusion(inserted_clip, item.text_properties)
+
+            needs_manual_move = True
+            target_tc = _frame_to_tc(item.record_start_frame, start_frame,
+                                     start_tc, fps)
+            text_label = ""
+            if item.text_properties and item.text_properties.styled_text:
+                text_label = item.text_properties.styled_text[:40].replace("\n", " ")
+
+            manual_steps.append({
+                "name": item.generator_name,
+                "text": text_label,
+                "target_track": track.index,
+                "target_tc": target_tc,
+            })
+
+        # Apply transform
+        t = item.transform
+        try:
+            inserted_clip.SetProperty("Pan", t.pan)
+            inserted_clip.SetProperty("Tilt", t.tilt)
+            inserted_clip.SetProperty("ZoomX", t.zoom_x)
+            inserted_clip.SetProperty("ZoomY", t.zoom_y)
+            inserted_clip.SetProperty("Opacity", t.opacity)
+        except (AttributeError, TypeError):
+            pass
+
+    if manual_steps:
+        print("")
+        print("  ┌─────────────────────────────────────────────────┐")
+        print("  │  ACTION NEEDED: Move text overlay(s) into place │")
+        print("  └─────────────────────────────────────────────────┘")
+        print("  Resolve places text on the correct track but can't")
+        print("  position it at the exact timecode via the API.")
+        print("  Drag these clips to the right position:")
+        print("")
+        for step in manual_steps:
+            label = f"'{step['text']}'" if step["text"] else step["name"]
+            print(f"    -> {label}  ->  V{step['target_track']} "
+                  f"at {step['target_tc']}")
+        print("")
+
+
 def _apply_speed(clip, speed: SpeedChange, item_id: str) -> None:
     """Apply speed/retime properties to a Resolve timeline item."""
     if not speed.is_retimed and speed.retime_process == 0 and speed.motion_estimation == 0:
@@ -436,7 +896,10 @@ def _apply_speed(clip, speed: SpeedChange, item_id: str) -> None:
 
 
 def _apply_video_speed(timeline, video_tracks: List[VideoTrack]) -> None:
-    """Apply speed changes to video clips already on the timeline."""
+    """Apply speed changes to video clips already on the timeline.
+
+    Skips generator items — they don't go through the same clip index mapping.
+    """
     track_count = timeline.GetTrackCount("video")
     for track in video_tracks:
         if track.index > track_count:
@@ -444,10 +907,14 @@ def _apply_video_speed(timeline, video_tracks: List[VideoTrack]) -> None:
         clips = timeline.GetItemListInTrack("video", track.index)
         if not clips:
             continue
-        for i, item in enumerate(track.items):
-            if i >= len(clips):
+        clip_idx = 0
+        for item in track.items:
+            if item.is_generator:
+                continue
+            if clip_idx >= len(clips):
                 break
-            _apply_speed(clips[i], item.speed, item.id)
+            _apply_speed(clips[clip_idx], item.speed, item.id)
+            clip_idx += 1
 
 
 def _apply_audio_speed(timeline, audio_tracks: List[AudioTrack]) -> None:
@@ -466,7 +933,10 @@ def _apply_audio_speed(timeline, audio_tracks: List[AudioTrack]) -> None:
 
 
 def _apply_extended_video_properties(timeline, video_tracks: List[VideoTrack]) -> None:
-    """Apply extended properties: transform details, composite mode, clip enabled, etc."""
+    """Apply extended properties: transform details, composite mode, clip enabled, etc.
+
+    Skips generator items — they get properties applied in _apply_generators.
+    """
     track_count = timeline.GetTrackCount("video")
     for track in video_tracks:
         if track.index > track_count:
@@ -474,10 +944,14 @@ def _apply_extended_video_properties(timeline, video_tracks: List[VideoTrack]) -
         clips = timeline.GetItemListInTrack("video", track.index)
         if not clips:
             continue
-        for i, item in enumerate(track.items):
-            if i >= len(clips):
+        clip_idx = 0
+        for item in track.items:
+            if item.is_generator:
+                continue
+            if clip_idx >= len(clips):
                 break
-            clip = clips[i]
+            clip = clips[clip_idx]
+            clip_idx += 1
             t = item.transform
 
             _set_prop = clip.SetProperty
@@ -801,7 +1275,6 @@ def deserialize_timeline(timeline, project, project_dir: str, resolve_app=None) 
     old_name = timeline.GetName() or "Timeline"
     timestamp = int(time.time())
 
-    # Phase 1: Collect video clip infos for atomic timeline creation
     video_clip_infos = _collect_video_clip_infos(media_pool, video_tracks, manifest)
 
     # Phase 2: Create new timeline with FIRST video clip only.
@@ -809,6 +1282,9 @@ def deserialize_timeline(timeline, project, project_dir: str, resolve_app=None) 
     # Remaining clips are added via AppendToTimeline after the switch.
     new_timeline, created_with_first, remaining_clip_infos = \
         _create_timeline_with_clips(media_pool, video_clip_infos, timestamp)
+    # Phase 2: Create new timeline atomically with video clips.
+    new_timeline, created_with_clips = _create_timeline_with_clips(
+        media_pool, video_clip_infos, timestamp)
 
     if not new_timeline:
         print("  ERROR: Could not create new timeline. Aborting to prevent duplication.")
@@ -841,6 +1317,16 @@ def deserialize_timeline(timeline, project, project_dir: str, resolve_app=None) 
     video_refs = {
         item.media_ref for track in video_tracks for item in track.items
     }
+    # If CreateTimelineFromClips didn't work, fall back to AppendToTimeline
+    # but ONLY if we confirmed the timeline switch
+    if video_clip_infos and not created_with_clips:
+        if switched:
+            _apply_video_tracks(new_timeline, media_pool, video_tracks, manifest)
+        else:
+            print("  ERROR: Could not confirm timeline switch. "
+                  "Skipping video clips to prevent duplication.")
+
+    # Audio handling depends on how video clips were added.
     if audio_tracks:
         if video_clip_infos:
             # Video clips were added (either atomically or via fallback) —
@@ -856,6 +1342,7 @@ def deserialize_timeline(timeline, project, project_dir: str, resolve_app=None) 
         else:
             print("  Warning: Skipping audio tracks — could not confirm timeline switch.")
 
+    _apply_generators(new_timeline, video_tracks, project_dir, media_pool)
     _apply_video_speed(new_timeline, video_tracks)
     _apply_audio_speed(new_timeline, audio_tracks)
     _apply_extended_video_properties(new_timeline, video_tracks)

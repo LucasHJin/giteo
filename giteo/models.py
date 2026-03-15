@@ -177,6 +177,46 @@ class SpeedChange:
 
 
 @dataclass
+class TextProperties:
+    """Text properties extracted from a Fusion Text+ generator.
+
+    Stored for human-readable diffs (e.g. "changed text from X to Y").
+    The Fusion comp file (.comp) is the source of truth for full restore.
+    """
+    styled_text: str = ""
+    font: str = ""
+    size: float = 0.0
+    bold: bool = False
+    italic: bool = False
+    color: Optional[Dict[str, float]] = None
+
+    def to_dict(self) -> dict:
+        d: dict = {
+            "styled_text": self.styled_text,
+            "font": self.font,
+            "size": round(self.size, 6),
+        }
+        if self.bold:
+            d["bold"] = True
+        if self.italic:
+            d["italic"] = True
+        if self.color:
+            d["color"] = self.color
+        return d
+
+    @classmethod
+    def from_dict(cls, d: dict) -> "TextProperties":
+        return cls(
+            styled_text=d.get("styled_text", ""),
+            font=d.get("font", ""),
+            size=d.get("size", 0.0),
+            bold=d.get("bold", False),
+            italic=d.get("italic", False),
+            color=d.get("color"),
+        )
+
+
+@dataclass
 class VideoItem:
     id: str
     name: str
@@ -191,6 +231,18 @@ class VideoItem:
     composite_mode: int = 0
     dynamic_zoom_ease: int = 0
     clip_enabled: bool = True
+    item_type: str = "media"
+    generator_name: str = ""
+    fusion_comp_file: Optional[str] = None
+    text_properties: Optional[TextProperties] = None
+
+    @property
+    def is_generator(self) -> bool:
+        return self.item_type in ("generator", "title")
+
+    @property
+    def is_title(self) -> bool:
+        return self.item_type == "title"
 
     def to_dict(self) -> dict:
         d = {
@@ -218,13 +270,36 @@ class VideoItem:
             )
         if not self.clip_enabled:
             d["clip_enabled"] = False
+        if self.item_type != "media":
+            d["item_type"] = self.item_type
+        if self.generator_name:
+            d["generator_name"] = self.generator_name
+        if self.fusion_comp_file:
+            d["fusion_comp_file"] = self.fusion_comp_file
+        if self.text_properties:
+            d["text_properties"] = self.text_properties.to_dict()
         return d
 
     @classmethod
     def from_dict(cls, d: dict) -> "VideoItem":
+        text_props = None
+        if "text_properties" in d:
+            text_props = TextProperties.from_dict(d["text_properties"])
+
+        item_type = d.get("item_type", "media")
+        generator_name = d.get("generator_name", "")
+
+        # Backward compat: placeholder PNGs saved by the old serializer
+        # (before it detected them as generators) should still be treated
+        # as titles so the deserializer restores them via Fusion comp.
+        name = d.get("name", "")
+        if item_type == "media" and "placeholder_" in name and ".png" in name:
+            item_type = "title"
+            generator_name = generator_name or "Text+"
+
         return cls(
             id=d["id"],
-            name=d["name"],
+            name=name,
             media_ref=d["media_ref"],
             record_start_frame=d["record_start_frame"],
             record_end_frame=d["record_end_frame"],
@@ -236,6 +311,10 @@ class VideoItem:
             composite_mode=d.get("composite_mode", 0),
             dynamic_zoom_ease=d.get("dynamic_zoom_ease", 0),
             clip_enabled=d.get("clip_enabled", True),
+            item_type=item_type,
+            generator_name=generator_name,
+            fusion_comp_file=d.get("fusion_comp_file"),
+            text_properties=text_props,
         )
 
 
