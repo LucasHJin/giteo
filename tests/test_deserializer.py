@@ -7,6 +7,7 @@ import pytest
 
 from giteo.serializer import serialize_timeline
 from giteo.deserializer import (
+    capture_restore_state,
     _collect_video_clip_infos,
     _create_fresh_timeline,
     _create_timeline_with_clips,
@@ -14,7 +15,8 @@ from giteo.deserializer import (
     _wait_for_current_timeline,
     deserialize_timeline,
     _apply_grade_from_drx, 
-    restore_timeline_overlays
+    restore_timeline_overlays,
+    should_restore_overlays_only,
 )
 from tests.mock_resolve import (
     MockMediaPool,
@@ -296,3 +298,74 @@ def test_restore_timeline_overlays_clears_and_reapplies_markers(monkeypatch):
 
     assert timeline.deleted_markers == [10]
     assert timeline.added_markers == [(25, "Green", "new", "note", 2)]
+
+
+def test_overlay_only_restore_allows_color_and_marker_changes(project_dir):
+    os.makedirs(os.path.join(project_dir, "timeline"), exist_ok=True)
+
+    before = {
+        "domains": {
+            "cuts": {"video_tracks": []},
+            "audio": {"audio_tracks": []},
+            "effects": {},
+            "metadata": {"timeline_name": "Edit"},
+            "manifest": {"assets": {}},
+        },
+        "generators": {},
+    }
+    after = {
+        "domains": {
+            "cuts": {"video_tracks": []},
+            "audio": {"audio_tracks": []},
+            "effects": {},
+            "metadata": {"timeline_name": "Edit"},
+            "manifest": {"assets": {}},
+            "color": {"grades": {"item_001_000": {"drx_file": "grade.drx"}}},
+            "markers": {"markers": [{"frame": 10}]},
+        },
+        "generators": {},
+    }
+
+    assert should_restore_overlays_only(before, after) is True
+
+
+def test_overlay_only_restore_rejects_generator_sidecar_changes(project_dir):
+    generators_dir = os.path.join(project_dir, "timeline", "generators")
+    os.makedirs(generators_dir, exist_ok=True)
+
+    before = capture_restore_state(project_dir)
+
+    comp_path = os.path.join(generators_dir, "item_001_000.comp")
+    with open(comp_path, "w") as f:
+        f.write("TextPlus { StyledText = Input { Value = \"Hello\" } }")
+
+    after = capture_restore_state(project_dir)
+
+    assert should_restore_overlays_only(before, after) is False
+
+
+def test_overlay_only_restore_rejects_effect_changes(project_dir):
+    os.makedirs(os.path.join(project_dir, "timeline"), exist_ok=True)
+
+    before = {
+        "domains": {
+            "cuts": {"video_tracks": []},
+            "audio": {"audio_tracks": []},
+            "effects": {},
+            "metadata": {"timeline_name": "Edit"},
+            "manifest": {"assets": {}},
+        },
+        "generators": {},
+    }
+    after = {
+        "domains": {
+            "cuts": {"video_tracks": []},
+            "audio": {"audio_tracks": []},
+            "effects": {"transitions": [{"id": "fx_1"}]},
+            "metadata": {"timeline_name": "Edit"},
+            "manifest": {"assets": {}},
+        },
+        "generators": {},
+    }
+
+    assert should_restore_overlays_only(before, after) is False
