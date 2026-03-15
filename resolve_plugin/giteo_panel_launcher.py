@@ -75,6 +75,118 @@ def _find_system_python():
     return None
 
 
+def _structural_merge_json(ours_json, theirs_json):
+    """Merge two versions of a domain JSON file by combining items.
+
+    For cuts.json: merges video_tracks — items from both branches are
+    combined, deduped by ID, with 'theirs' winning on conflicts.
+    For audio.json: same logic for audio_tracks.
+    For markers.json: combines markers, deduped by frame.
+    For other JSON: takes theirs.
+    """
+    import copy
+    merged = copy.deepcopy(ours_json)
+
+    # Merge video_tracks (cuts.json)
+    if "video_tracks" in theirs_json:
+        our_tracks = {t["index"]: t for t in merged.get("video_tracks", [])}
+        for their_track in theirs_json["video_tracks"]:
+            idx = their_track["index"]
+            if idx in our_tracks:
+                our_ids = {item["id"] for item in our_tracks[idx].get("items", [])}
+                for item in their_track.get("items", []):
+                    if item["id"] not in our_ids:
+                        our_tracks[idx].setdefault("items", []).append(item)
+            else:
+                our_tracks[idx] = copy.deepcopy(their_track)
+        merged["video_tracks"] = sorted(our_tracks.values(), key=lambda t: t["index"])
+
+    # Merge audio_tracks (audio.json)
+    if "audio_tracks" in theirs_json:
+        our_tracks = {t["index"]: t for t in merged.get("audio_tracks", [])}
+        for their_track in theirs_json["audio_tracks"]:
+            idx = their_track["index"]
+            if idx in our_tracks:
+                our_ids = {item["id"] for item in our_tracks[idx].get("items", [])}
+                for item in their_track.get("items", []):
+                    if item["id"] not in our_ids:
+                        our_tracks[idx].setdefault("items", []).append(item)
+            else:
+                our_tracks[idx] = copy.deepcopy(their_track)
+        merged["audio_tracks"] = sorted(our_tracks.values(), key=lambda t: t["index"])
+
+    # Merge markers (markers.json)
+    if "markers" in theirs_json:
+        our_frames = {m.get("frame") for m in merged.get("markers", [])}
+        for marker in theirs_json.get("markers", []):
+            if marker.get("frame") not in our_frames:
+                merged.setdefault("markers", []).append(marker)
+
+    # Merge grades (color.json)
+    if "grades" in theirs_json:
+        merged.setdefault("grades", {}).update(theirs_json["grades"])
+
+    # Merge assets (manifest.json)
+    if "assets" in theirs_json:
+        merged.setdefault("assets", {}).update(theirs_json["assets"])
+
+    return merged
+
+
+def _resolve_merge_conflicts(project_dir, conflicted, target, current):
+    """Resolve merge conflicts structurally for domain files.
+
+    JSON domain files (cuts, audio, color, markers): structural merge
+    that combines items from both branches by ID.
+    .comp files: take theirs (incoming branch).
+    .drx files: if deleted in theirs, accept deletion; else take theirs.
+
+    Returns True if all conflicts resolved, False otherwise.
+    """
+    from giteo.core import git_checkout_theirs, git_add, git_commit, GitError
+
+    json_conflicts = [f for f in conflicted if f.endswith(".json")]
+    other_conflicts = [f for f in conflicted if not f.endswith(".json")]
+
+    # Structural merge for JSON domain files
+    for cf in json_conflicts:
+        filepath = os.path.join(project_dir, cf)
+        try:
+            # Read ours and theirs via git
+            ours_raw = subprocess.run(
+                ["git", "show", f":2:{cf}"],
+                cwd=project_dir, capture_output=True, text=True)
+            theirs_raw = subprocess.run(
+                ["git", "show", f":3:{cf}"],
+                cwd=project_dir, capture_output=True, text=True)
+
+            if ours_raw.returncode == 0 and theirs_raw.returncode == 0:
+                ours = json.loads(ours_raw.stdout)
+                theirs = json.loads(theirs_raw.stdout)
+                merged = _structural_merge_json(ours, theirs)
+                with open(filepath, "w") as f:
+                    json.dump(merged, f, indent=2, sort_keys=True)
+                _log(f"Structurally merged {cf}")
+            else:
+                git_checkout_theirs(project_dir, [cf])
+        except (json.JSONDecodeError, KeyError):
+            git_checkout_theirs(project_dir, [cf])
+
+    # Non-JSON files (.comp, .drx, etc.)
+    for cf in other_conflicts:
+        try:
+            git_checkout_theirs(project_dir, [cf])
+        except GitError:
+            subprocess.run(
+                ["git", "rm", "-f", cf],
+                cwd=project_dir, capture_output=True)
+
+    git_add(project_dir, conflicted)
+    git_commit(project_dir,
+               f"giteo: merged '{target}' into '{current}' (auto-resolved)")
+    return True
+
+
 def handle_request(request, resolve_app, project_dir):
     """Handle a JSON request from the Qt subprocess.
 
@@ -174,14 +286,10 @@ def handle_request(request, resolve_app, project_dir):
             success, output = git_merge(project_dir, target)
             if not success:
                 conflicted = git_list_conflicted_files(project_dir)
-                auto_resolvable = [f for f in conflicted if f.endswith(".drx") or f.startswith("timeline/")]
-                non_resolvable = [f for f in conflicted if f not in auto_resolvable]
-                if auto_resolvable and not non_resolvable:
+                if conflicted:
                     try:
-                        git_checkout_theirs(project_dir, auto_resolvable)
-                        git_add(project_dir, auto_resolvable)
-                        git_commit(project_dir, f"giteo: merged '{target}' (auto-resolved)")
-                        success = True
+                        success = _resolve_merge_conflicts(
+                            project_dir, conflicted, target, current)
                     except GitError as e:
                         return {"ok": False, "error": f"Auto-resolve failed: {e}"}
 

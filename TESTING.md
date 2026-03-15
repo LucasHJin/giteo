@@ -123,6 +123,7 @@ This tests the basic save/branch/switch loop with one person.
 4. Import 2 clips into the Media Pool (File > Import > Media)
 5. Create a timeline ("Main Edit") and drag both clips onto V1
 
+
 Your timeline:
 
 ```

@@ -18,6 +18,7 @@ from .models import (
     ColorNodeGrade,
     Marker,
     SpeedChange,
+    TextProperties,
     Timeline,
     TimelineMetadata,
     Transform,
@@ -37,6 +38,16 @@ def _compute_media_hash(filepath: str) -> str:
     except (OSError, IOError):
         # File may not be accessible — use path-based fallback
         return f"sha256:{hashlib.sha256(filepath.encode()).hexdigest()[:12]}"
+
+
+def _int_or(val, default: int = 0) -> int:
+    """Safely convert a Resolve API return value to int."""
+    if val is None:
+        return default
+    try:
+        return int(val)
+    except (TypeError, ValueError):
+        return default
 
 
 def _safe_float(clip, prop: str, default: float = 0.0) -> float:
@@ -138,7 +149,135 @@ def _get_clip_enabled(clip) -> bool:
         return True
 
 
-def _serialize_video_tracks(timeline) -> Tuple[List[VideoTrack], Dict[str, Asset]]:
+def _is_generator(clip, media_pool_item) -> bool:
+    """Check if a timeline item is a generator/title rather than a media clip.
+
+    Any clip without a File Path is a generator or title (Text, Text+,
+    Solid Color, etc.). Fusion comps are optional — "Text" titles in
+    Resolve may not have Fusion compositions.
+    """
+    media_path = ""
+    if media_pool_item:
+        media_path = media_pool_item.GetClipProperty("File Path") or ""
+    return not media_path
+
+
+def _export_fusion_comp(clip, project_dir: str, item_id: str) -> Optional[str]:
+    """Export a Fusion composition to a .comp file. Returns filename or None."""
+    generators_dir = os.path.join(project_dir, "timeline", "generators")
+    os.makedirs(generators_dir, exist_ok=True)
+    comp_filename = f"{item_id}.comp"
+    comp_path = os.path.join(generators_dir, comp_filename)
+    try:
+        result = clip.ExportFusionComp(comp_path, 1)
+        if result:
+            return comp_filename
+    except (AttributeError, TypeError):
+        pass
+    return None
+
+
+def _find_text_tool(comp):
+    """Find a text-related tool in a Fusion composition.
+
+    Resolve uses different tool IDs depending on the title type:
+    - TextPlus — the "Text+" title
+    - Text3D — some text generators
+    Other tools may also have StyledText inputs.
+    """
+    TEXT_TOOL_IDS = {"TextPlus", "Text3D", "StyledText"}
+
+    # First try filtered search for known text tools
+    for tool_id in TEXT_TOOL_IDS:
+        try:
+            tools = comp.GetToolList(False, tool_id)
+            if tools:
+                vals = list(tools.values()) if isinstance(tools, dict) else list(tools)
+                if vals:
+                    return vals[0]
+        except (AttributeError, TypeError):
+            continue
+
+    # Fall back to scanning all tools for one with StyledText input
+    try:
+        all_tools = comp.GetToolList() or {}
+        tool_list = list(all_tools.values()) if isinstance(all_tools, dict) else list(all_tools)
+        for tool in tool_list:
+            try:
+                val = tool.GetInput("StyledText")
+                if val is not None:
+                    return tool
+            except (AttributeError, TypeError):
+                continue
+    except (AttributeError, TypeError):
+        pass
+
+    return None
+
+
+def _read_text_properties(clip) -> Optional[TextProperties]:
+    """Read text properties from a Fusion composition for human-readable diffs.
+
+    Works with both "Text+" (TextPlus) and "Text" (Text3D or other) titles.
+    """
+    try:
+        comp_count = clip.GetFusionCompCount()
+        if not comp_count or comp_count < 1:
+            return None
+        comp = clip.GetFusionCompByIndex(1)
+        if not comp:
+            return None
+
+        tool = _find_text_tool(comp)
+        if not tool:
+            return None
+
+        text = str(tool.GetInput("StyledText") or "")
+        font = str(tool.GetInput("Font") or "")
+        raw_size = tool.GetInput("Size")
+        size = float(raw_size) if raw_size is not None else 0.0
+        bold = bool(tool.GetInput("Bold"))
+        italic = bool(tool.GetInput("Italic"))
+
+        color = None
+        try:
+            r = tool.GetInput("Red1")
+            g = tool.GetInput("Green1")
+            b = tool.GetInput("Blue1")
+            if r is not None and g is not None and b is not None:
+                color = {"r": round(float(r), 4), "g": round(float(g), 4),
+                         "b": round(float(b), 4)}
+        except (TypeError, ValueError):
+            pass
+
+        return TextProperties(
+            styled_text=text, font=font, size=size,
+            bold=bold, italic=italic, color=color,
+        )
+    except (AttributeError, TypeError):
+        return None
+
+
+def _source_frame_ratio(timeline, media_pool_item) -> float:
+    """Compute source_fps / timeline_fps for frame-rate conversion.
+
+    GetDuration() and GetLeftOffset() return timeline-frame-rate values,
+    but CreateTimelineFromClips startFrame/endFrame expect source-frame-rate
+    values. When the source clip FPS differs from the timeline FPS (e.g.
+    30fps clip on a 24fps timeline), we must convert.
+    """
+    try:
+        timeline_fps = float(timeline.GetSetting("timelineFrameRate") or 0)
+        source_fps_str = media_pool_item.GetClipProperty("FPS") if media_pool_item else None
+        source_fps = float(source_fps_str) if source_fps_str else 0.0
+        if source_fps > 0 and timeline_fps > 0 and abs(source_fps - timeline_fps) > 0.01:
+            return source_fps / timeline_fps
+    except (TypeError, ValueError, AttributeError):
+        pass
+    return 1.0
+
+
+def _serialize_video_tracks(timeline, project_dir: str = "") -> Tuple[List[VideoTrack], Dict[str, Asset]]:
     """Extract video tracks and build asset manifest."""
     video_tracks = []
     assets = {}
@@ -154,43 +293,99 @@ def _serialize_video_tracks(timeline) -> Tuple[List[VideoTrack], Dict[str, Asset
         for i, clip in enumerate(clips):
             media_pool_item = clip.GetMediaPoolItem()
             clip_name = clip.GetName() or f"clip_{track_idx}_{i}"
+            item_id = f"item_{track_idx:03d}_{i:03d}"
 
-            # Build media reference
             media_path = ""
             if media_pool_item:
                 media_path = media_pool_item.GetClipProperty("File Path") or ""
-            media_ref = _compute_media_hash(media_path) if media_path else f"sha256:unknown_{i}"
 
-            # Register asset
-            if media_path and media_ref not in assets:
-                duration = int(media_pool_item.GetClipProperty("Frames") or 0) if media_pool_item else 0
-                codec = (media_pool_item.GetClipProperty("Video Codec") or "unknown") if media_pool_item else "unknown"
-                res = (media_pool_item.GetClipProperty("Resolution") or "unknown") if media_pool_item else "unknown"
-                assets[media_ref] = Asset(
-                    filename=os.path.basename(media_path),
-                    original_path=media_path,
-                    duration_frames=duration,
-                    codec=codec,
-                    resolution=res,
+            # Detect generators: either no media path (true Text+/generator)
+            # or a giteo placeholder PNG (transparent image used to place
+            # text on V2+ — should be re-serialized as a generator, not media)
+            is_placeholder = (media_path and
+                              os.path.basename(media_path).startswith("placeholder_") and
+                              ".giteo" in media_path)
+            if is_placeholder or (not media_path and _is_generator(clip, media_pool_item)):
+                media_ref = f"generator:{item_id}"
+                fusion_comp_file = _export_fusion_comp(
+                    clip, project_dir, item_id) if project_dir else None
+                text_props = _read_text_properties(clip)
+                generator_name = clip_name if clip_name != f"clip_{track_idx}_{i}" else "Text+"
+
+                _lower = generator_name.lower()
+                is_title = (text_props is not None
+                            or "text" in _lower
+                            or "title" in _lower
+                            or "subtitle" in _lower
+                            or "lower third" in _lower
+                            or "scroll" in _lower)
+                item_type = "title" if is_title else "generator"
+
+                start = _int_or(clip.GetStart())
+                end = _int_or(clip.GetEnd())
+                left_off = _int_or(clip.GetLeftOffset())
+                dur = _int_or(clip.GetDuration(), end - start)
+
+                video_item = VideoItem(
+                    id=item_id,
+                    name=clip_name,
+                    media_ref=media_ref,
+                    record_start_frame=start,
+                    record_end_frame=end,
+                    source_start_frame=left_off,
+                    source_end_frame=left_off + dur,
+                    track_index=track_idx,
+                    transform=_get_clip_transform(clip),
+                    speed=_get_clip_speed(clip),
+                    composite_mode=_safe_int(clip, "CompositeMode", 0),
+                    dynamic_zoom_ease=_safe_int(clip, "DynamicZoomEase", 0),
+                    clip_enabled=_get_clip_enabled(clip),
+                    item_type=item_type,
+                    generator_name=generator_name,
+                    fusion_comp_file=fusion_comp_file,
+                    text_properties=text_props,
                 )
+            else:
+                media_ref = _compute_media_hash(media_path) if media_path else f"sha256:unknown_{i}"
 
-            item_id = f"item_{track_idx:03d}_{i:03d}"
+                if media_path and media_ref not in assets:
+                    duration = _int_or(media_pool_item.GetClipProperty("Frames")) if media_pool_item else 0
+                    codec = (media_pool_item.GetClipProperty("Video Codec") or "unknown") if media_pool_item else "unknown"
+                    res = (media_pool_item.GetClipProperty("Resolution") or "unknown") if media_pool_item else "unknown"
+                    assets[media_ref] = Asset(
+                        filename=os.path.basename(media_path),
+                        original_path=media_path,
+                        duration_frames=duration,
+                        codec=codec,
+                        resolution=res,
+                    )
 
-            video_item = VideoItem(
-                id=item_id,
-                name=clip_name,
-                media_ref=media_ref,
-                record_start_frame=int(clip.GetStart()),
-                record_end_frame=int(clip.GetEnd()),
-                source_start_frame=int(clip.GetLeftOffset()),
-                source_end_frame=int(clip.GetLeftOffset()) + int(clip.GetDuration()),
-                track_index=track_idx,
-                transform=_get_clip_transform(clip),
-                speed=_get_clip_speed(clip),
-                composite_mode=_safe_int(clip, "CompositeMode", 0),
-                dynamic_zoom_ease=_safe_int(clip, "DynamicZoomEase", 0),
-                clip_enabled=_get_clip_enabled(clip),
-            )
+                start = _int_or(clip.GetStart())
+                end = _int_or(clip.GetEnd())
+                left_off = _int_or(clip.GetLeftOffset())
+                dur = _int_or(clip.GetDuration(), end - start)
+
+                # Convert timeline-frame-rate values to source-frame-rate
+                # for correct startFrame/endFrame in CreateTimelineFromClips.
+                ratio = _source_frame_ratio(timeline, media_pool_item)
+                src_start = round(left_off * ratio)
+                src_end = round((left_off + dur) * ratio)
+
+                video_item = VideoItem(
+                    id=item_id,
+                    name=clip_name,
+                    media_ref=media_ref,
+                    record_start_frame=start,
+                    record_end_frame=end,
+                    source_start_frame=src_start,
+                    source_end_frame=src_end,
+                    track_index=track_idx,
+                    transform=_get_clip_transform(clip),
+                    speed=_get_clip_speed(clip),
+                    composite_mode=_safe_int(clip, "CompositeMode", 0),
+                    dynamic_zoom_ease=_safe_int(clip, "DynamicZoomEase", 0),
+                    clip_enabled=_get_clip_enabled(clip),
+                )
             items.append(video_item)
 
         video_tracks.append(VideoTrack(index=track_idx, items=items))
@@ -217,13 +412,15 @@ def _serialize_audio_tracks(timeline) -> List[AudioTrack]:
                 media_path = media_pool_item.GetClipProperty("File Path") or ""
             media_ref = _compute_media_hash(media_path) if media_path else f"sha256:unknown_a{i}"
 
+            vol_raw = clip.GetProperty("Volume")
+            pan_raw = clip.GetProperty("Pan")
             audio_item = AudioItem(
                 id=f"audio_{track_idx:03d}_{i:03d}",
                 media_ref=media_ref,
-                start_frame=int(clip.GetStart()),
-                end_frame=int(clip.GetEnd()),
-                volume=float(clip.GetProperty("Volume") or 0.0),
-                pan=float(clip.GetProperty("Pan") or 0.0),
+                start_frame=_int_or(clip.GetStart()),
+                end_frame=_int_or(clip.GetEnd()),
+                volume=float(vol_raw) if vol_raw is not None else 0.0,
+                pan=float(pan_raw) if pan_raw is not None else 0.0,
                 speed=_get_clip_speed(clip),
             )
             items.append(audio_item)
@@ -538,7 +735,7 @@ def serialize_timeline(timeline, project, project_dir: str,
     Returns:
         Timeline dataclass with all extracted data
     """
-    video_tracks, assets = _serialize_video_tracks(timeline)
+    video_tracks, assets = _serialize_video_tracks(timeline, project_dir)
     audio_tracks = _serialize_audio_tracks(timeline)
     color_grades = _serialize_color(timeline, video_tracks, project,
                                     project_dir, resolve_app)
