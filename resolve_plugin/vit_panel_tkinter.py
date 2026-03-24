@@ -158,7 +158,7 @@ def main():
         project = _resolve.GetProjectManager().GetCurrentProject()
         timeline = project.GetCurrentTimeline()
         if timeline:
-            deserialize_timeline(timeline, project, project_dir)
+            deserialize_timeline(timeline, project, project_dir, resolve_app=_resolve)
             append_log("Timeline restored.")
             show_message("Vit", f"Restored timeline from '{target}'.")
         else:
@@ -225,7 +225,7 @@ def main():
             project = _resolve.GetProjectManager().GetCurrentProject()
             timeline = project.GetCurrentTimeline()
             if timeline:
-                deserialize_timeline(timeline, project, project_dir)
+                deserialize_timeline(timeline, project, project_dir, resolve_app=_resolve)
                 append_log("Timeline restored.")
             refresh_branch()
             show_message("Vit", f"Merged '{target}' into '{current}'.")
@@ -270,7 +270,7 @@ def main():
         project = _resolve.GetProjectManager().GetCurrentProject()
         timeline = project.GetCurrentTimeline()
         if timeline:
-            deserialize_timeline(timeline, project, project_dir)
+            deserialize_timeline(timeline, project, project_dir, resolve_app=_resolve)
             append_log("Timeline restored.")
         show_message("Vit", f"Pulled '{branch}' and restored timeline.")
 

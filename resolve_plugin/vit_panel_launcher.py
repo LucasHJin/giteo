@@ -147,7 +147,7 @@ def handle_request(request, resolve_app, project_dir):
             project = resolve_app.GetProjectManager().GetCurrentProject()
             timeline = project.GetCurrentTimeline()
             if timeline:
-                deserialize_timeline(timeline, project, project_dir)
+                deserialize_timeline(timeline, project, project_dir, resolve_app=resolve_app)
                 return {"ok": True, "branch": target, "restored": True}
             return {"ok": True, "branch": target, "restored": False}
 
@@ -196,7 +196,7 @@ def handle_request(request, resolve_app, project_dir):
                 project = resolve_app.GetProjectManager().GetCurrentProject()
                 timeline = project.GetCurrentTimeline()
                 if timeline:
-                    deserialize_timeline(timeline, project, project_dir)
+                    deserialize_timeline(timeline, project, project_dir, resolve_app=resolve_app)
                 issue_text = format_issues(issues) if issues else ""
                 return {"ok": True, "branch": target, "current": current, "issues": issue_text}
             else:
@@ -224,7 +224,7 @@ def handle_request(request, resolve_app, project_dir):
             project = resolve_app.GetProjectManager().GetCurrentProject()
             timeline = project.GetCurrentTimeline()
             if timeline:
-                deserialize_timeline(timeline, project, project_dir)
+                deserialize_timeline(timeline, project, project_dir, resolve_app=resolve_app)
             return {"ok": True, "branch": branch, "output": output.strip()}
 
         elif action == "status":

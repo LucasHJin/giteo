@@ -511,6 +511,7 @@ class ColorGrade:
     nodes: List[ColorNodeGrade] = field(default_factory=list)
     version_name: str = ""
     drx_file: Optional[str] = None
+    lut_file: Optional[str] = None
 
     def to_dict(self) -> dict:
         return {
@@ -518,6 +519,7 @@ class ColorGrade:
             "nodes": [n.to_dict() for n in self.nodes],
             "version_name": self.version_name,
             "drx_file": self.drx_file,
+            "lut_file": self.lut_file,
         }
 
     @classmethod
@@ -534,6 +536,7 @@ class ColorGrade:
             nodes=nodes,
             version_name=d.get("version_name", ""),
             drx_file=d.get("drx_file"),
+            lut_file=d.get("lut_file"),
         )
 
 

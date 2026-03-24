@@ -217,6 +217,20 @@ def merge_timeline_domains_for_overlays(
                     if ours_grade is not None and ours_grade.get("drx_file") == drx_file:
                         plan.grade_restore_ours.add(str(drx_file))
                     grade_copy["drx_file"] = new_drx
+
+            lut_file = grade_copy.get("lut_file")
+            if lut_file:
+                if str(lut_file).startswith(f"{original_id}_"):
+                    new_lut = str(lut_file).replace(f"{original_id}_", f"{overlay_id}_", 1)
+                elif str(lut_file).startswith(original_id):
+                    new_lut = str(lut_file).replace(original_id, overlay_id, 1)
+                else:
+                    new_lut = f"{overlay_id}.cube"
+                if new_lut != lut_file:
+                    plan.grade_renames[str(lut_file)] = new_lut
+                    if ours_grade is not None and ours_grade.get("lut_file") == lut_file:
+                        plan.grade_restore_ours.add(str(lut_file))
+                    grade_copy["lut_file"] = new_lut
             merged["color"]["grades"][overlay_id] = grade_copy
 
     merged["metadata"] = copy.deepcopy(merged.get("metadata", {}))
@@ -254,6 +268,9 @@ def referenced_sidecars(domain_files: Dict[str, dict]) -> Tuple[set, set]:
         drx_file = grade.get("drx_file")
         if drx_file:
             grade_files.add(f"timeline/grades/{drx_file}")
+        lut_file = grade.get("lut_file")
+        if lut_file:
+            grade_files.add(f"timeline/grades/{lut_file}")
 
     return generator_files, grade_files
 

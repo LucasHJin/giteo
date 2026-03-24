@@ -716,16 +716,107 @@ def _export_grade_stills(timeline, project, project_dir: str,
             pass
 
 
+def _export_grade_luts(timeline, project_dir: str,
+                       grades: Dict[str, ColorGrade],
+                       resolve_app=None) -> None:
+    """Export each clip's color grade as a baked .cube LUT file.
+
+    Uses TimelineItem.ExportLUT() which captures the complete visual result
+    of all color nodes combined. Works on Resolve Free and Studio.
+
+    The exported .cube files are text-based and git-diffable. On restore,
+    the LUT is applied to node 1 after resetting all grades.
+
+    NOTE: This bakes all nodes into one LUT — the node structure is lost.
+    Metadata (node count, labels, tools) is still captured separately in
+    color.json for human-readable diffs.
+    """
+    grades_dir = os.path.join(project_dir, "timeline", "grades")
+    os.makedirs(grades_dir, exist_ok=True)
+
+    # Clean up old .cube files to avoid stale exports
+    for f in os.listdir(grades_dir):
+        if f.endswith(".cube"):
+            try:
+                os.remove(os.path.join(grades_dir, f))
+            except OSError:
+                pass
+
+    saved_page = None
+    if resolve_app:
+        try:
+            saved_page = resolve_app.GetCurrentPage()
+            if saved_page != "color":
+                resolve_app.OpenPage("color")
+                time.sleep(0.3)
+        except (AttributeError, TypeError):
+            saved_page = None
+
+    lut_export_works = None  # tri-state: None=untested, True/False
+
+    track_count = timeline.GetTrackCount("video")
+    print(f"  [LUT export] Starting — {track_count} video track(s), grades_dir={grades_dir}")
+
+    for track_idx in range(1, track_count + 1):
+        clips = timeline.GetItemListInTrack("video", track_idx)
+        if not clips:
+            continue
+
+        for i, clip in enumerate(clips):
+            if lut_export_works is False:
+                break
+
+            item_id = f"item_{track_idx:03d}_{i:03d}"
+            cube_path = os.path.join(grades_dir, f"{item_id}.cube")
+
+            # Check if ExportLUT method exists on this clip
+            export_lut = getattr(clip, "ExportLUT", None)
+            if not callable(export_lut):
+                if lut_export_works is None:
+                    lut_export_works = False
+                    print(f"  [LUT export] ExportLUT not available on TimelineItem (type={type(clip).__name__})")
+                    print(f"  [LUT export] Available methods: {[m for m in dir(clip) if not m.startswith('_') and callable(getattr(clip, m, None))]}")
+                break
+
+            try:
+                # ExportLUT export types: 0=17pt, 1=33pt, 2=65pt, 3=Panasonic VLUT
+                # Use 33-point cube (good balance of accuracy vs file size)
+                success = export_lut(1, cube_path)
+                file_exists = os.path.exists(cube_path)
+                print(f"  [LUT export] {item_id}: ExportLUT returned {success!r}, file exists={file_exists}")
+
+                if success and file_exists:
+                    grades[item_id].lut_file = f"{item_id}.cube"
+                    if lut_export_works is None:
+                        lut_export_works = True
+                        print(f"  [LUT export] Success! LUT export working.")
+                else:
+                    if lut_export_works is None:
+                        lut_export_works = False
+                        print("  Note: LUT export unavailable on this Resolve version.")
+                        print("  Color tracked via node structure and metadata only.")
+            except Exception as e:
+                print(f"  [LUT export] {item_id}: Exception — {type(e).__name__}: {e}")
+                if lut_export_works is None:
+                    lut_export_works = False
+
+    if saved_page and resolve_app and saved_page != "color":
+        try:
+            resolve_app.OpenPage(saved_page)
+        except (AttributeError, TypeError):
+            pass
+
+
 def _serialize_color(timeline, video_tracks: List[VideoTrack],
                      project=None, project_dir: str = "",
                      resolve_app=None) -> Dict[str, ColorGrade]:
     """Extract color grading data per clip.
 
-    The Resolve API is mostly write-only for color, so we capture what we can:
-      1. Clip-level adjustments (contrast, saturation, hue) via GetProperty()
-      2. Node structure (count, labels) via undocumented but working APIs
-      3. DRX grade stills for full-fidelity binary backup (the only way to
-         capture complete grades including CDL, curves, qualifiers, etc.)
+    Capture strategy (in order of fidelity):
+      1. Baked .cube LUT per clip via ExportLUT() (works on Free + Studio)
+      2. DRX grade stills for full node-level backup (Studio only)
+      3. Node structure metadata (count, labels, tools) for diffs
+      4. Clip-level adjustments via GetProperty() (Studio only)
     """
     grades = {}
     track_count = timeline.GetTrackCount("video")
@@ -744,6 +835,11 @@ def _serialize_color(timeline, video_tracks: List[VideoTrack],
                 version_name=version_name,
             )
 
+    # Export baked LUT files (primary capture — works on Free)
+    if project_dir:
+        _export_grade_luts(timeline, project_dir, grades, resolve_app)
+
+    # Export DRX stills (secondary — Studio only, full fidelity)
     if project and project_dir:
         _export_grade_stills(timeline, project, project_dir, grades, resolve_app)
 

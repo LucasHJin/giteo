@@ -5,6 +5,8 @@ Reads the JSON files and applies the state back to a Resolve timeline.
 
 import hashlib
 import os
+import platform
+import shutil
 import time
 from typing import Dict, List
 
@@ -1141,6 +1143,126 @@ def _apply_clip_adjustments(clip, node: ColorNodeGrade) -> None:
                 pass
 
 
+def _parse_cube_for_cdl(cube_path: str) -> dict:
+    """Parse a 3D .cube LUT and estimate CDL (Slope/Offset/Power) values.
+
+    Works well for primary color corrections (color wheels = CDL).
+    Samples the cube's black point (offset), white point (slope), and
+    midpoint (power/gamma) to reconstruct approximate CDL values.
+
+    Returns a SetCDL-compatible dict, or empty dict on failure.
+    """
+    import math
+
+    try:
+        with open(cube_path, "r") as f:
+            lines = f.readlines()
+    except OSError:
+        return {}
+
+    size = None
+    data = []
+    for line in lines:
+        stripped = line.strip()
+        if stripped.startswith("LUT_3D_SIZE"):
+            try:
+                size = int(stripped.split()[1])
+            except (IndexError, ValueError):
+                pass
+        elif stripped and not stripped.startswith("#") and not any(
+            stripped.startswith(k)
+            for k in ("TITLE", "LUT_3D", "LUT_1D", "DOMAIN_MIN", "DOMAIN_MAX")
+        ):
+            parts = stripped.split()
+            if len(parts) == 3:
+                try:
+                    data.append((float(parts[0]), float(parts[1]), float(parts[2])))
+                except ValueError:
+                    pass
+
+    expected = size ** 3 if size else 0
+    if not size or len(data) < expected:
+        return {}
+
+    # Black point (0,0,0) → index 0
+    black = data[0]
+    # White point (1,1,1) → last index
+    white = data[expected - 1]
+    # Midpoint (0.5, 0.5, 0.5) → index half + half*size + half*size^2
+    half = size // 2
+    mid_idx = half + half * size + half * size * size
+    mid = data[mid_idx] if mid_idx < len(data) else None
+
+    # CDL Offset = output at (0,0,0)
+    offset = [black[0], black[1], black[2]]
+
+    # CDL Slope = range from black to white (clamped away from zero)
+    slope = [
+        max(white[0] - black[0], 0.01),
+        max(white[1] - black[1], 0.01),
+        max(white[2] - black[2], 0.01),
+    ]
+
+    # CDL Power = gamma estimated from midpoint
+    # At input 0.5: expected output (linear) = offset + 0.5*slope
+    # With gamma:   output = offset + (0.5**power)*slope
+    # Solve: power = log(normalized_mid) / log(0.5)
+    power = [1.0, 1.0, 1.0]
+    if mid:
+        for i in range(3):
+            if slope[i] > 0.01:
+                normalized = (mid[i] - offset[i]) / slope[i]
+                if 0.001 < normalized < 0.999:
+                    try:
+                        power[i] = math.log(normalized) / math.log(0.5)
+                    except (ValueError, ZeroDivisionError):
+                        pass
+
+    return {
+        "NodeIndex": "1",
+        "Slope": f"{slope[0]:.6f} {slope[1]:.6f} {slope[2]:.6f}",
+        "Offset": f"{offset[0]:.6f} {offset[1]:.6f} {offset[2]:.6f}",
+        "Power": f"{power[0]:.6f} {power[1]:.6f} {power[2]:.6f}",
+        "Saturation": "1.000000",
+    }
+
+
+def _cdl_is_identity(cdl_dict: dict, tolerance: float = 0.03) -> bool:
+    """Return True if CDL values represent a no-op (identity) color transform."""
+    try:
+        slopes = [float(x) for x in cdl_dict.get("Slope", "1 1 1").split()]
+        offsets = [float(x) for x in cdl_dict.get("Offset", "0 0 0").split()]
+        powers = [float(x) for x in cdl_dict.get("Power", "1 1 1").split()]
+    except (ValueError, IndexError):
+        return False
+    return (
+        all(abs(s - 1.0) <= tolerance for s in slopes)
+        and all(abs(o) <= tolerance for o in offsets)
+        and all(abs(p - 1.0) <= tolerance for p in powers)
+    )
+
+
+def _get_resolve_lut_vit_dir() -> str:
+    """Return the vit/ subdirectory inside Resolve's user LUT folder.
+
+    Resolve's SetLUT() API requires LUT files to be inside one of Resolve's
+    configured LUT search paths. We use a 'vit/' subdirectory inside the
+    user-writable LUT folder so Resolve can find them.
+    """
+    if platform.system() == "Darwin":
+        base = os.path.expanduser(
+            "~/Library/Application Support/Blackmagic Design/DaVinci Resolve/LUT"
+        )
+    elif platform.system() == "Windows":
+        base = os.path.join(
+            os.environ.get("PROGRAMDATA", r"C:\ProgramData"),
+            "Blackmagic Design", "DaVinci Resolve", "Support", "LUT",
+        )
+    else:
+        return ""
+    return os.path.join(base, "vit")
+
+
 def _apply_color(timeline, color_grades: Dict[str, ColorGrade],
                  project_dir: str = "", resolve_app=None,
                  video_tracks: List[VideoTrack] = None) -> None:
@@ -1159,12 +1281,16 @@ def _apply_color(timeline, color_grades: Dict[str, ColorGrade],
     grades_dir = os.path.join(project_dir, "timeline", "grades") if project_dir else ""
     saved_page = None
 
+    print(f"  [Color restore] Starting — {len(color_grades)} grade(s), grades_dir={grades_dir}")
+    print(f"  [Color restore] resolve_app={'yes' if resolve_app else 'NO'}, project_dir={project_dir}")
+
     if resolve_app:
         try:
             saved_page = resolve_app.GetCurrentPage()
             if saved_page != "color":
                 resolve_app.OpenPage("color")
                 time.sleep(0.3)
+                print(f"  [Color restore] Switched to color page (was {saved_page})")
         except (AttributeError, TypeError):
             saved_page = None
 
@@ -1175,6 +1301,45 @@ def _apply_color(timeline, color_grades: Dict[str, ColorGrade],
     if video_tracks:
         for track in video_tracks:
             track_item_ids[track.index] = [item.id for item in track.items]
+
+    # Build media_ref → preferred grade fallback mapping.
+    # When a clip has no direct grade by item_id, OR has only an identity grade
+    # (e.g. a clip was split on one branch while color was added on another),
+    # match by source media file so split pieces inherit the non-identity grade.
+    item_to_media_ref: Dict[str, str] = {}
+    if video_tracks:
+        for track in video_tracks:
+            for item in track.items:
+                if not item.is_generator and item.media_ref:
+                    item_to_media_ref[item.id] = item.media_ref
+
+    # For each media_ref, prefer a non-identity grade over an identity one.
+    # Parse each grade's .cube to check — this lets split clips inherit the
+    # graded version even when color.json also has an identity entry for them.
+    media_ref_to_grade: Dict[str, ColorGrade] = {}
+    for iid, g in color_grades.items():
+        media_ref = item_to_media_ref.get(iid)
+        if not media_ref:
+            continue
+        if media_ref in media_ref_to_grade:
+            continue  # already have a grade; only upgrade to non-identity below
+        media_ref_to_grade[media_ref] = g
+
+    # Upgrade any identity placeholder to a non-identity grade from same source
+    for iid, g in color_grades.items():
+        media_ref = item_to_media_ref.get(iid)
+        if not media_ref or media_ref not in media_ref_to_grade:
+            continue
+        if media_ref_to_grade[media_ref] is g:
+            continue  # same grade, nothing to upgrade
+        if not g.lut_file or not grades_dir:
+            continue
+        cube_path = os.path.join(grades_dir, g.lut_file)
+        if not os.path.exists(cube_path):
+            continue
+        cdl = _parse_cube_for_cdl(cube_path)
+        if cdl and not _cdl_is_identity(cdl):
+            media_ref_to_grade[media_ref] = g  # prefer non-identity
 
     try:
         track_count = timeline.GetTrackCount("video")
@@ -1191,8 +1356,30 @@ def _apply_color(timeline, color_grades: Dict[str, ColorGrade],
                 else:
                     item_id = f"item_{track_idx:03d}_{i:03d}"
                 grade = color_grades.get(item_id)
+                media_ref = item_to_media_ref.get(item_id)
+
+                # If the clip's own grade is identity, check whether a non-identity
+                # grade exists for the same source (split-clip scenario after merge).
+                if grade and grade.lut_file and grades_dir and media_ref:
+                    cube_check = os.path.join(grades_dir, grade.lut_file)
+                    if os.path.exists(cube_check):
+                        cdl_check = _parse_cube_for_cdl(cube_check)
+                        if cdl_check and _cdl_is_identity(cdl_check):
+                            preferred = media_ref_to_grade.get(media_ref)
+                            if preferred and preferred is not grade:
+                                print(f"  [Color restore] {item_id}: identity grade → using non-identity from same source")
+                                grade = preferred
+
+                if not grade:
+                    # No grade by item_id — fall back to any grade for same source
+                    if media_ref:
+                        grade = media_ref_to_grade.get(media_ref)
+                        if grade:
+                            print(f"  [Color restore] {item_id}: matched grade via media_ref (split clip)")
                 if not grade:
                     continue
+
+                print(f"  [Color restore] {item_id}: drx_file={grade.drx_file!r}, lut_file={grade.lut_file!r}, nodes={len(grade.nodes)}")
 
                 # Priority 1: DRX grade restore (complete node-based grade)
                 if grade.drx_file and grades_dir:
@@ -1200,12 +1387,83 @@ def _apply_color(timeline, color_grades: Dict[str, ColorGrade],
                     if os.path.exists(drx_path):
                         target_clip = _focus_clip_for_color_page(timeline, clip)
                         if _apply_grade_from_drx(timeline, target_clip, drx_path, item_id):
+                            print(f"  [Color restore] {item_id}: DRX restore succeeded")
                             time.sleep(0.1)
                             continue
                     else:
                         print(f"  Warning: Missing DRX file for {item_id}: {drx_path}")
 
-                # Priority 2: CDL values per node
+                # Priority 2: Baked LUT grade restore (.cube file)
+                if grade.lut_file and grades_dir:
+                    lut_path = os.path.join(grades_dir, grade.lut_file)
+                    if os.path.exists(lut_path):
+                        # Focus the clip so Color page APIs target the right item
+                        target_clip = _focus_clip_for_color_page(timeline, clip)
+                        lut_applied = False
+
+                        try:
+                            node_graph = target_clip.GetNodeGraph()
+                            if node_graph:
+                                num_nodes_before = node_graph.GetNumNodes()
+                                reset_result = node_graph.ResetAllGrades()
+                                num_nodes_after = node_graph.GetNumNodes()
+                                print(f"  [Color restore] {item_id}: nodes before={num_nodes_before}, after ResetAllGrades={num_nodes_after}")
+
+                                # SetLUT requires the file to be in Resolve's LUT
+                                # search path. Copy to Resolve's user LUT directory
+                                # and use the relative path.
+                                resolve_lut_dir = _get_resolve_lut_vit_dir()
+                                if resolve_lut_dir:
+                                    try:
+                                        os.makedirs(resolve_lut_dir, exist_ok=True)
+                                        dest = os.path.join(resolve_lut_dir, grade.lut_file)
+                                        shutil.copy2(lut_path, dest)
+                                        rel_path = os.path.join("vit", grade.lut_file)
+                                        set_result = node_graph.SetLUT(1, rel_path)
+                                        print(f"  [Color restore] {item_id}: SetLUT(1, '{rel_path}') returned {set_result!r}")
+                                        if set_result:
+                                            lut_applied = True
+                                    except Exception as e:
+                                        print(f"  [Color restore] {item_id}: LUT dir copy/set error — {e}")
+
+                                # Also try absolute path in case relative fails
+                                if not lut_applied:
+                                    set_result = node_graph.SetLUT(1, lut_path)
+                                    print(f"  [Color restore] {item_id}: SetLUT(1, abs_path) returned {set_result!r}")
+                                    if set_result:
+                                        lut_applied = True
+                        except (AttributeError, TypeError) as e:
+                            print(f"  [Color restore] {item_id}: NodeGraph error — {type(e).__name__}: {e}")
+
+                        # Final fallback: parse .cube → estimate CDL → SetCDL
+                        # Works well for primary color corrections (color wheels).
+                        if not lut_applied:
+                            cdl_dict = _parse_cube_for_cdl(lut_path)
+                            if cdl_dict:
+                                # Try on both clip objects — target_clip (focused via
+                                # Color page) and the original clip from GetItemListInTrack
+                                for clip_obj, label in [(target_clip, "target_clip"), (clip, "clip")]:
+                                    try:
+                                        cdl_result = clip_obj.SetCDL(cdl_dict)
+                                        print(f"  [Color restore] {item_id}: SetCDL via {label} returned {cdl_result!r}")
+                                        if cdl_result:
+                                            lut_applied = True
+                                            break
+                                    except (AttributeError, TypeError) as e:
+                                        print(f"  [Color restore] {item_id}: SetCDL via {label} error — {e}")
+                            else:
+                                print(f"  [Color restore] {item_id}: Could not parse .cube for CDL")
+
+                        if lut_applied:
+                            print(f"  [Color restore] {item_id}: grade restore succeeded")
+                            time.sleep(0.1)
+                            continue
+                        else:
+                            print(f"  [Color restore] {item_id}: grade restore FAILED — all methods returned False")
+                    else:
+                        print(f"  Warning: Missing LUT file for {item_id}: {lut_path}")
+
+                # Priority 3: CDL values per node
                 cdl_applied = False
                 for node in grade.nodes:
                     if _apply_cdl(clip, node):

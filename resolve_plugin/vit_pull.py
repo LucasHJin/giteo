@@ -67,7 +67,7 @@ def main():
     project = _resolve.GetProjectManager().GetCurrentProject()
     timeline = project.GetCurrentTimeline()
     if timeline:
-        deserialize_timeline(timeline, project, project_dir)
+        deserialize_timeline(timeline, project, project_dir, resolve_app=_resolve)
         show_message("Vit: Pull", f"Pulled latest for '{branch}' and restored timeline.\n\n{output.strip()}")
     else:
         show_message("Vit: Pull", f"Pulled latest for '{branch}'.\nNo active timeline to restore.\n\n{output.strip()}")
