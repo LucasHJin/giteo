@@ -1227,6 +1227,21 @@ def _parse_cube_for_cdl(cube_path: str) -> dict:
     }
 
 
+def _cdl_is_identity(cdl_dict: dict, tolerance: float = 0.03) -> bool:
+    """Return True if CDL values represent a no-op (identity) color transform."""
+    try:
+        slopes = [float(x) for x in cdl_dict.get("Slope", "1 1 1").split()]
+        offsets = [float(x) for x in cdl_dict.get("Offset", "0 0 0").split()]
+        powers = [float(x) for x in cdl_dict.get("Power", "1 1 1").split()]
+    except (ValueError, IndexError):
+        return False
+    return (
+        all(abs(s - 1.0) <= tolerance for s in slopes)
+        and all(abs(o) <= tolerance for o in offsets)
+        and all(abs(p - 1.0) <= tolerance for p in powers)
+    )
+
+
 def _get_resolve_lut_vit_dir() -> str:
     """Return the vit/ subdirectory inside Resolve's user LUT folder.
 
@@ -1287,6 +1302,45 @@ def _apply_color(timeline, color_grades: Dict[str, ColorGrade],
         for track in video_tracks:
             track_item_ids[track.index] = [item.id for item in track.items]
 
+    # Build media_ref → preferred grade fallback mapping.
+    # When a clip has no direct grade by item_id, OR has only an identity grade
+    # (e.g. a clip was split on one branch while color was added on another),
+    # match by source media file so split pieces inherit the non-identity grade.
+    item_to_media_ref: Dict[str, str] = {}
+    if video_tracks:
+        for track in video_tracks:
+            for item in track.items:
+                if not item.is_generator and item.media_ref:
+                    item_to_media_ref[item.id] = item.media_ref
+
+    # For each media_ref, prefer a non-identity grade over an identity one.
+    # Parse each grade's .cube to check — this lets split clips inherit the
+    # graded version even when color.json also has an identity entry for them.
+    media_ref_to_grade: Dict[str, ColorGrade] = {}
+    for iid, g in color_grades.items():
+        media_ref = item_to_media_ref.get(iid)
+        if not media_ref:
+            continue
+        if media_ref in media_ref_to_grade:
+            continue  # already have a grade; only upgrade to non-identity below
+        media_ref_to_grade[media_ref] = g
+
+    # Upgrade any identity placeholder to a non-identity grade from same source
+    for iid, g in color_grades.items():
+        media_ref = item_to_media_ref.get(iid)
+        if not media_ref or media_ref not in media_ref_to_grade:
+            continue
+        if media_ref_to_grade[media_ref] is g:
+            continue  # same grade, nothing to upgrade
+        if not g.lut_file or not grades_dir:
+            continue
+        cube_path = os.path.join(grades_dir, g.lut_file)
+        if not os.path.exists(cube_path):
+            continue
+        cdl = _parse_cube_for_cdl(cube_path)
+        if cdl and not _cdl_is_identity(cdl):
+            media_ref_to_grade[media_ref] = g  # prefer non-identity
+
     try:
         track_count = timeline.GetTrackCount("video")
         for track_idx in range(1, track_count + 1):
@@ -1302,8 +1356,27 @@ def _apply_color(timeline, color_grades: Dict[str, ColorGrade],
                 else:
                     item_id = f"item_{track_idx:03d}_{i:03d}"
                 grade = color_grades.get(item_id)
+                media_ref = item_to_media_ref.get(item_id)
+
+                # If the clip's own grade is identity, check whether a non-identity
+                # grade exists for the same source (split-clip scenario after merge).
+                if grade and grade.lut_file and grades_dir and media_ref:
+                    cube_check = os.path.join(grades_dir, grade.lut_file)
+                    if os.path.exists(cube_check):
+                        cdl_check = _parse_cube_for_cdl(cube_check)
+                        if cdl_check and _cdl_is_identity(cdl_check):
+                            preferred = media_ref_to_grade.get(media_ref)
+                            if preferred and preferred is not grade:
+                                print(f"  [Color restore] {item_id}: identity grade → using non-identity from same source")
+                                grade = preferred
+
                 if not grade:
-                    print(f"  [Color restore] {item_id}: no grade found in color_grades")
+                    # No grade by item_id — fall back to any grade for same source
+                    if media_ref:
+                        grade = media_ref_to_grade.get(media_ref)
+                        if grade:
+                            print(f"  [Color restore] {item_id}: matched grade via media_ref (split clip)")
+                if not grade:
                     continue
 
                 print(f"  [Color restore] {item_id}: drx_file={grade.drx_file!r}, lut_file={grade.lut_file!r}, nodes={len(grade.nodes)}")
