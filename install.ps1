@@ -128,7 +128,7 @@ Write-Host ""
 Write-Host "  Next steps:"
 Write-Host "    1. Restart your terminal"
 Write-Host "    2. Create and open your project in DaVinci Resolve"
-Write-Host "    3. Run: vit init your-project-name" in your terminal
+Write-Host "    3. Run: vit init your-project-name (in your terminal)"
 Write-Host "       (creates a vit tracking folder anywhere on disk — location doesn't matter)"
 Write-Host "    4. Run: vit collab setup"
 Write-Host "       (connect to a GitHub repo so your team can share the project)"

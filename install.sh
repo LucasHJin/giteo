@@ -114,7 +114,7 @@ echo ""
 echo "  Next steps:"
 echo "    1. Restart your terminal (or run: source ~/.zshrc)"
 echo "    2. Create and open your project in DaVinci Resolve"
-echo "    3. Run: vit init your-project-name" in your terminal
+echo "    3. Run: vit init your-project-name (in your terminal)"
 echo "       (creates a vit tracking folder anywhere on disk — location doesn't matter)"
 echo "    4. Run: vit collab setup"
 echo "       (connect to a GitHub repo so your team can share the project)"
