@@ -46,7 +46,11 @@ def _find_system_python():
         "/usr/bin/python3",
         "/opt/homebrew/bin/python3",
     ]
-    # Check vit project venv first (from install-resolve package_path)
+    # Check the install.sh venv (~/.vit/venv/) first — highest priority
+    _installer_venv_py = os.path.expanduser("~/.vit/venv/bin/python3")
+    if os.path.exists(_installer_venv_py):
+        candidates.insert(1, _installer_venv_py)
+    # Check vit project venv (from install-resolve package_path)
     _pf = os.path.expanduser("~/.vit/package_path")
     if os.path.exists(_pf):
         with open(_pf) as _f:
@@ -54,7 +58,7 @@ def _find_system_python():
         for venv_name in (".venv", "venv", "env"):
             venv_py = os.path.join(pkg_root, venv_name, "bin", "python3")
             if os.path.exists(venv_py):
-                candidates.insert(1, venv_py)  # High priority
+                candidates.insert(1, venv_py)
                 break
     # Check versioned Pythons (3.9-3.13) in common locations
     import glob
