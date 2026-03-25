@@ -80,26 +80,28 @@ if (Test-Path "$VIT_SRC\.git") {
     git clone --quiet $REPO_URL $VIT_SRC
 }
 
-# ── Install Python package ───────────────────
+# ── Install into venv ───────────────────────
+
+$VIT_VENV = "$VIT_HOME\venv"
+
+if (-not (Test-Path $VIT_VENV)) {
+    Write-Host "  Creating virtual environment..."
+    & $PYTHON -m venv $VIT_VENV
+}
 
 Write-Host "  Installing Vit package..."
-$ErrorActionPreference = "Continue"
-$pipOutput = & $PYTHON -m pip install $VIT_SRC --quiet 2>&1
-$ErrorActionPreference = "Stop"
-# If pip warns the Scripts dir is not on PATH, add it for this session and permanently
-$scriptsDir = $null
-foreach ($line in $pipOutput) {
-    if ($line -match "installed in '([^']+)'.*not on PATH") {
-        $scriptsDir = $Matches[1]
-    }
-}
-if ($scriptsDir -and -not ($env:PATH -split ';' | Where-Object { $_ -eq $scriptsDir })) {
-    Write-Host "  Adding $scriptsDir to PATH..."
-    $env:PATH = "$scriptsDir;$env:PATH"
-    # Persist for future terminal sessions
+& "$VIT_VENV\Scripts\pip.exe" install $VIT_SRC --quiet
+
+# ── Add venv Scripts to PATH ─────────────────
+
+$VIT_BIN = "$VIT_VENV\Scripts"
+$userPath = [System.Environment]::GetEnvironmentVariable("PATH", "User")
+if (-not ($userPath -split ';' | Where-Object { $_ -eq $VIT_BIN })) {
+    Write-Host "  Adding $VIT_BIN to PATH..."
+    $env:PATH = "$VIT_BIN;$env:PATH"
     [System.Environment]::SetEnvironmentVariable(
         "PATH",
-        "$scriptsDir;" + [System.Environment]::GetEnvironmentVariable("PATH", "User"),
+        "$VIT_BIN;" + $userPath,
         "User"
     )
 }
@@ -107,12 +109,12 @@ if ($scriptsDir -and -not ($env:PATH -split ';' | Where-Object { $_ -eq $scripts
 # ── Install Resolve plugin scripts ───────────
 
 Write-Host "  Installing DaVinci Resolve scripts..."
-$vitCmd = Get-Command "vit" -ErrorAction SilentlyContinue
-if ($vitCmd) {
-    & vit install-resolve
+$vitExe = "$VIT_BIN\vit.exe"
+if (Test-Path $vitExe) {
+    & $vitExe install-resolve
 } else {
     try {
-        & $PYTHON -m vit.cli install-resolve
+        & "$VIT_VENV\Scripts\python.exe" -m vit.cli install-resolve
     } catch {
         Write-Host ""
         Write-Host "  Note: Could not auto-install Resolve scripts."

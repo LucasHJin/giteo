@@ -40,42 +40,85 @@ def _log(msg):
 
 def _find_system_python():
     """Find a system Python 3 that has PySide6 installed."""
-    candidates = [
-        sys.executable,
-        "/usr/local/bin/python3",
-        "/usr/bin/python3",
-        "/opt/homebrew/bin/python3",
-    ]
-    # Check the install.sh venv (~/.vit/venv/) first — highest priority
-    _installer_venv_py = os.path.expanduser("~/.vit/venv/bin/python3")
+    import glob
+    is_windows = sys.platform == "win32"
+
+    # Venv binary name differs by platform
+    if is_windows:
+        venv_bin = os.path.join("Scripts", "python.exe")
+    else:
+        venv_bin = os.path.join("bin", "python3")
+
+    candidates = [sys.executable]
+
+    # installer venv (~/.vit/venv/) — highest priority after sys.executable
+    _installer_venv_py = os.path.expanduser(os.path.join("~", ".vit", "venv", venv_bin))
     if os.path.exists(_installer_venv_py):
-        candidates.insert(1, _installer_venv_py)
-    # Check vit project venv (from install-resolve package_path)
-    _pf = os.path.expanduser("~/.vit/package_path")
+        candidates.append(_installer_venv_py)
+
+    # vit project venv (from install-resolve package_path)
+    _pf = os.path.expanduser(os.path.join("~", ".vit", "package_path"))
     if os.path.exists(_pf):
         with open(_pf) as _f:
             pkg_root = _f.read().strip()
         for venv_name in (".venv", "venv", "env"):
-            venv_py = os.path.join(pkg_root, venv_name, "bin", "python3")
+            venv_py = os.path.join(pkg_root, venv_name, venv_bin)
             if os.path.exists(venv_py):
-                candidates.insert(1, venv_py)
+                candidates.append(venv_py)
                 break
-    # Check versioned Pythons (3.9-3.13) in common locations
-    import glob
-    for pattern in [
-        "/opt/homebrew/opt/python@3.*/bin/python3.*",
-        "/opt/homebrew/bin/python3.*",
-        "/usr/local/bin/python3.*",
-    ]:
-        for p in sorted(glob.glob(pattern), reverse=True):
-            if not p.endswith(("-config", "-intel64")):
+
+    if is_windows:
+        # Windows: check common install locations and PATH
+        home = os.path.expanduser("~")
+        appdata = os.environ.get("LOCALAPPDATA", "")
+        programfiles = os.environ.get("PROGRAMFILES", "C:\\Program Files")
+        programfiles_x86 = os.environ.get("PROGRAMFILES(X86)", "C:\\Program Files (x86)")
+
+        # py launcher (most reliable on Windows)
+        candidates.append("py")
+
+        # AppData installs (default for non-admin pip installs)
+        for pat in [
+            os.path.join(appdata, "Programs", "Python", "Python3*", "python.exe"),
+            os.path.join(appdata, "Programs", "Python", "Python3*", "Scripts", "python.exe"),
+        ]:
+            for p in sorted(glob.glob(pat), reverse=True):
                 candidates.append(p)
-    # Also check common virtualenv/pyenv locations
-    home = os.path.expanduser("~")
-    candidates.append(os.path.join(home, ".pyenv", "shims", "python3"))
+
+        # System-wide installs
+        for pat in [
+            os.path.join(programfiles, "Python3*", "python.exe"),
+            os.path.join(programfiles_x86, "Python3*", "python.exe"),
+            "C:\\Python3*\\python.exe",
+        ]:
+            for p in sorted(glob.glob(pat), reverse=True):
+                candidates.append(p)
+
+        # PATH fallbacks
+        for name in ("python3", "python"):
+            candidates.append(name)
+    else:
+        # macOS / Linux
+        candidates += [
+            "/usr/local/bin/python3",
+            "/usr/bin/python3",
+            "/opt/homebrew/bin/python3",
+        ]
+        for pattern in [
+            "/opt/homebrew/opt/python@3.*/bin/python3.*",
+            "/opt/homebrew/bin/python3.*",
+            "/usr/local/bin/python3.*",
+        ]:
+            for p in sorted(glob.glob(pattern), reverse=True):
+                if not p.endswith(("-config", "-intel64")):
+                    candidates.append(p)
+        home = os.path.expanduser("~")
+        candidates.append(os.path.join(home, ".pyenv", "shims", "python3"))
 
     for python in candidates:
-        if not os.path.exists(python):
+        # For bare command names (py, python, python3) skip the exists check
+        is_bare_cmd = not os.sep in python and not os.path.isabs(python)
+        if not is_bare_cmd and not os.path.exists(python):
             continue
         try:
             result = subprocess.run(
