@@ -5,6 +5,7 @@ import json
 import os
 import shutil
 import sys
+from typing import Optional
 
 from . import __version__
 from .core import (
@@ -467,6 +468,118 @@ def cmd_validate(args):
         print("  Validation passed — no issues found.")
 
 
+def cmd_config(args):
+    """Configure AI/LLM settings for the project."""
+    from .ai_merge import load_llm_config
+    
+    project_dir = _require_project()
+    env_path = os.path.join(project_dir, ".env")
+    
+    if args.list:
+        # Show current config
+        config = load_llm_config()
+        print("  AI Configuration:")
+        print("  " + "-" * 40)
+        if config.provider == "openai":
+            print(f"  Provider: OpenAI-compatible API")
+            print(f"  URL: {config.base_url or '(not set)'}")
+            print(f"  Model: {config.model or '(default: qwen2.5-coder:14b)'}")
+        else:
+            print(f"  Provider: Gemini")
+            gemini_key = _load_api_key_from_env(project_dir)
+            if gemini_key:
+                masked = gemini_key[:8] + "..." + gemini_key[-4:] if len(gemini_key) > 12 else "***"
+                print(f"  GEMINI_API_KEY: {masked}")
+            else:
+                print(f"  GEMINI_API_KEY: (not set)")
+        
+        # Show .env file location
+        if os.path.exists(env_path):
+            print(f"  Config file: {env_path}")
+        else:
+            print(f"  Config file: {env_path} (will be created when setting values)")
+        return
+    
+    # Read existing .env content
+    env_vars = {}
+    if os.path.exists(env_path):
+        with open(env_path) as f:
+            for line in f:
+                line = line.strip()
+                if line and "=" in line and not line.startswith("#"):
+                    key, value = line.split("=", 1)
+                    env_vars[key] = value.strip().strip('"').strip("'")
+    
+    updated = False
+    
+    if args.gemini_key:
+        env_vars["GEMINI_API_KEY"] = args.gemini_key
+        print("  Set GEMINI_API_KEY")
+        updated = True
+        # If setting Gemini key, remove local LLM URL to avoid conflict
+        if "VIT_LLM_URL" in env_vars:
+            del env_vars["VIT_LLM_URL"]
+            print("  Cleared VIT_LLM_URL (using Gemini)")
+    
+    if args.llm_url:
+        env_vars["VIT_LLM_URL"] = args.llm_url
+        print(f"  Set VIT_LLM_URL to {args.llm_url}")
+        print(f"  (Using OpenAI-compatible API)")
+        updated = True
+    
+    if args.llm_model:
+        env_vars["VIT_LLM_MODEL"] = args.llm_model
+        print(f"  Set VIT_LLM_MODEL to {args.llm_model}")
+        updated = True
+    
+    if args.clear_gemini:
+        if "GEMINI_API_KEY" in env_vars:
+            del env_vars["GEMINI_API_KEY"]
+            print("  Cleared GEMINI_API_KEY")
+            updated = True
+    
+    if args.clear_llm:
+        if "VIT_LLM_URL" in env_vars:
+            del env_vars["VIT_LLM_URL"]
+            print("  Cleared VIT_LLM_URL")
+            updated = True
+        if "VIT_LLM_MODEL" in env_vars:
+            del env_vars["VIT_LLM_MODEL"]
+            print("  Cleared VIT_LLM_MODEL")
+            updated = True
+    
+    if updated:
+        # Write back to .env
+        with open(env_path, "w") as f:
+            f.write("# Vit AI Configuration\n")
+            f.write("# Set either GEMINI_API_KEY or VIT_LLM_URL (local LLM takes priority)\n\n")
+            for key, value in sorted(env_vars.items()):
+                # Quote value if it contains spaces
+                if " " in value:
+                    f.write(f'{key}="{value}"\n')
+                else:
+                    f.write(f"{key}={value}\n")
+        print(f"\n  Configuration saved to {env_path}")
+    else:
+        print("  No changes made. Use --help to see available options.")
+
+
+def _load_api_key_from_env(project_dir: str) -> Optional[str]:
+    """Load GEMINI_API_KEY from environment or .env file."""
+    key = os.environ.get("GEMINI_API_KEY")
+    if key:
+        return key
+    
+    env_path = os.path.join(project_dir, ".env")
+    if os.path.exists(env_path):
+        with open(env_path) as f:
+            for line in f:
+                line = line.strip()
+                if line.startswith("GEMINI_API_KEY="):
+                    return line.split("=", 1)[1].strip().strip('"')
+    return None
+
+
 if sys.platform == "win32":
     RESOLVE_SCRIPTS_DIR = os.path.join(
         os.environ.get("APPDATA", ""),
@@ -746,6 +859,16 @@ def main():
     # validate
     p_validate = subparsers.add_parser("validate", help="Validate timeline consistency")
     p_validate.set_defaults(func=cmd_validate)
+
+    # config
+    p_config = subparsers.add_parser("config", help="Configure AI/LLM settings")
+    p_config.add_argument("-l", "--list", action="store_true", help="Show current configuration")
+    p_config.add_argument("--gemini-key", help="Set Gemini API key")
+    p_config.add_argument("--llm-url", help="Set OpenAI-compatible API URL (e.g., http://localhost:11434/v1, https://api.openai.com/v1)")
+    p_config.add_argument("--llm-model", help="Set model name for OpenAI-compatible API (default: qwen2.5-coder:14b)")
+    p_config.add_argument("--clear-gemini", action="store_true", help="Remove Gemini API key")
+    p_config.add_argument("--clear-llm", action="store_true", help="Remove OpenAI-compatible API settings")
+    p_config.set_defaults(func=cmd_config)
 
     # clone
     p_clone = subparsers.add_parser("clone", help="Clone a remote vit project")

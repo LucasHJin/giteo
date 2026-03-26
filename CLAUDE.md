@@ -52,7 +52,7 @@ CLI (`vit` command)      → vit-core (Python) → Git (system binary)  [power u
 | Language | Python 3.x |
 | Version control | System `git` binary |
 | Data format | JSON (`indent=2, sort_keys=True`) |
-| AI merge | Gemini API (`google-generativeai`) |
+| AI merge | Gemini API (`google-generativeai`) or OpenAI-compatible API (`openai`) |
 | Terminal | `rich` |
 
 ---

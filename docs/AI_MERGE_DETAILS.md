@@ -81,9 +81,44 @@ Return the resolved JSON for each domain file.
 """
 ```
 
+## LLM Provider Support
+
+Vit supports multiple LLM providers:
+
+| Provider | Setup | Best For |
+|----------|-------|----------|
+| **Gemini** | `GEMINI_API_KEY=your_key` | Default, no extra dependencies |
+| **OpenAI-compatible** | `VIT_LLM_URL=<url>` `VIT_LLM_MODEL=<model>` | Ollama (local), OpenAI, OpenRouter, Together AI, Groq, Azure |
+
+### Configuration Examples
+
+```bash
+# Gemini (default)
+export GEMINI_API_KEY=your_key_here
+
+# Ollama (local)
+export VIT_LLM_URL=http://localhost:11434/v1
+export VIT_LLM_MODEL=qwen2.5-coder:14b
+
+# OpenAI
+export VIT_LLM_URL=https://api.openai.com/v1
+export VIT_LLM_MODEL=gpt-4
+export GEMINI_API_KEY=your_openai_key  # Uses same env var for API key
+
+# OpenRouter
+export VIT_LLM_URL=https://openrouter.ai/api/v1
+export VIT_LLM_MODEL=anthropic/claude-3.5-sonnet
+export GEMINI_API_KEY=your_openrouter_key
+```
+
+### Requirements
+
+- **Gemini**: `pip install google-generativeai`
+- **OpenAI-compatible**: `pip install openai`
+
 ## Implementation Notes
 
-- Uses Gemini API via `google-generativeai` Python SDK
+- Uses Gemini API via `google-generativeai` Python SDK, or any OpenAI-compatible API via `openai` Python SDK
 - Called only when git can't merge cleanly OR post-merge validation finds issues
 - For common case (different domains, no cross-references), AI is never invoked
 - User always sees what the AI changed before commit

@@ -1,4 +1,4 @@
-"""AI-powered semantic merge resolution using Gemini API."""
+"""AI-powered semantic merge resolution using Gemini API or local LLM."""
 
 import json
 import os
@@ -90,6 +90,15 @@ class MergeAnalysis:
             decisions=decisions,
             resolved=data.get("resolved", {}),
         )
+
+
+@dataclass
+class LLMConfig:
+    """Configuration for LLM - either Gemini or OpenAI-compatible API."""
+    provider: str  # "gemini" or "openai"
+    api_key: Optional[str] = None  # For Gemini or OpenAI-compatible services
+    base_url: Optional[str] = None  # For OpenAI-compatible API (e.g., Ollama, OpenRouter, etc.)
+    model: Optional[str] = None  # Model name for OpenAI-compatible API
 
 
 MERGE_ANALYSIS_SYSTEM_PROMPT = """\
@@ -282,9 +291,147 @@ def _load_api_key() -> Optional[str]:
                 for line in f:
                     line = line.strip()
                     if line.startswith("GEMINI_API_KEY="):
-                        return line.split("=", 1)[1].strip().strip("'\"")
+                        return line.split("=", 1)[1].strip().strip('"')
 
     return None
+
+
+def _load_env_value(key: str) -> Optional[str]:
+    """Load a value from environment or .env file."""
+    value = os.environ.get(key)
+    if value:
+        return value
+
+    from .core import find_project_root
+    root = find_project_root()
+    if root:
+        env_path = os.path.join(root, ".env")
+        if os.path.exists(env_path):
+            with open(env_path) as f:
+                for line in f:
+                    line = line.strip()
+                    if line.startswith(f"{key}="):
+                        return line.split("=", 1)[1].strip().strip('"')
+
+    return None
+
+
+def load_llm_config() -> LLMConfig:
+    """Load LLM configuration from environment or .env file.
+    
+    Priority:
+    1. If VIT_LLM_URL is set, use OpenAI-compatible API (Ollama, OpenRouter, etc.)
+    2. If GEMINI_API_KEY is set, use Gemini
+    3. Default to Gemini (will fail gracefully if no key)
+    """
+    openai_url = _load_env_value("VIT_LLM_URL")
+    openai_model = _load_env_value("VIT_LLM_MODEL") or "qwen2.5-coder:14b"
+    gemini_key = _load_api_key()
+    
+    if openai_url:
+        return LLMConfig(
+            provider="openai",
+            base_url=openai_url,
+            model=openai_model
+        )
+    
+    return LLMConfig(
+        provider="gemini",
+        api_key=gemini_key
+    )
+
+
+class LocalLLMModel:
+    """Wrapper for local LLM using OpenAI-compatible API."""
+    
+    def __init__(self, client, model: str, system_instruction: str):
+        self.client = client
+        self.model = model
+        self.system_instruction = system_instruction
+    
+    def generate_content(self, prompt: str):
+        """Generate content using local LLM."""
+        messages = [
+            {"role": "system", "content": self.system_instruction},
+            {"role": "user", "content": prompt}
+        ]
+        
+        response = self.client.chat.completions.create(
+            model=self.model,
+            messages=messages,
+            temperature=0.3,  # Lower temperature for more deterministic JSON
+            max_tokens=8192
+        )
+        
+        # Return an object with .text attribute to match Gemini interface
+        class ResponseWrapper:
+            def __init__(self, text):
+                self.text = text
+        
+        return ResponseWrapper(response.choices[0].message.content)
+
+
+def _get_llm_model(system_prompt: str):
+    """Get a configured LLM model (Gemini or OpenAI-compatible API).
+    
+    Returns a model object with a generate_content() method.
+    """
+    config = load_llm_config()
+    
+    if config.provider == "openai":
+        try:
+            from openai import OpenAI
+        except ImportError:
+            raise ImportError(
+                "'openai' package not installed. Run: pip install openai"
+            )
+        
+        if not config.base_url:
+            raise ValueError(
+                "VIT_LLM_URL not set. Add it to .env or set the environment variable.\n"
+                "Example: VIT_LLM_URL=http://localhost:11434/v1"
+            )
+        
+        client = OpenAI(
+            base_url=config.base_url,
+            api_key=config.api_key or "not-needed"
+        )
+        
+        return LocalLLMModel(
+            client=client,
+            model=config.model or "qwen2.5-coder:14b",
+            system_instruction=system_prompt
+        )
+    
+    # Default to Gemini
+    try:
+        import google.generativeai as genai
+    except ImportError:
+        raise ImportError(
+            "'google-generativeai' package not installed. Run: pip install google-generativeai\n"
+            "Or set VIT_LLM_URL to use an OpenAI-compatible API instead."
+        )
+
+    if not config.api_key:
+        raise ValueError(
+            "GEMINI_API_KEY not set. Add it to .env or set the environment variable.\n"
+            "Or set VIT_LLM_URL to use an OpenAI-compatible API instead."
+        )
+
+    genai.configure(api_key=config.api_key)
+
+    return genai.GenerativeModel(
+        "gemini-2.5-flash",
+        system_instruction=system_prompt,
+    )
+
+
+def _get_genai_model(system_prompt: str):
+    """Get a configured model (Gemini or local LLM), handling import and setup.
+    
+    This is an alias for _get_llm_model for backward compatibility.
+    """
+    return _get_llm_model(system_prompt)
 
 
 def _extract_json_from_response(content: str) -> dict:
@@ -294,29 +441,6 @@ def _extract_json_from_response(content: str) -> dict:
     elif "```" in content:
         content = content.split("```")[1].split("```")[0]
     return json.loads(content.strip())
-
-
-def _get_genai_model(system_prompt: str):
-    """Get a configured Gemini model, handling import and API key setup."""
-    try:
-        import google.generativeai as genai
-    except ImportError:
-        raise ImportError(
-            "'google-generativeai' package not installed. Run: pip install google-generativeai"
-        )
-
-    api_key = _load_api_key()
-    if not api_key:
-        raise ValueError(
-            "GEMINI_API_KEY not set. Add it to .env or set the environment variable."
-        )
-
-    genai.configure(api_key=api_key)
-
-    return genai.GenerativeModel(
-        "gemini-2.5-flash",
-        system_instruction=system_prompt,
-    )
 
 
 def ai_analyze_merge(
@@ -339,7 +463,7 @@ def ai_analyze_merge(
         MergeAnalysis with per-domain decisions, or None if analysis fails
     """
     try:
-        model = _get_genai_model(MERGE_ANALYSIS_SYSTEM_PROMPT)
+        model = _get_llm_model(MERGE_ANALYSIS_SYSTEM_PROMPT)
     except (ImportError, ValueError) as e:
         print(f"Error: {e}")
         return None
@@ -357,7 +481,7 @@ def ai_analyze_merge(
         print(f"Error: AI returned invalid JSON: {e}")
         return None
     except Exception as e:
-        print(f"Error calling Gemini API: {e}")
+        print(f"Error calling LLM API: {e}")
         return None
 
 
@@ -384,7 +508,7 @@ def ai_resolve_clarifications(
         return {}
 
     try:
-        model = _get_genai_model(MERGE_CLARIFICATION_SYSTEM_PROMPT)
+        model = _get_llm_model(MERGE_CLARIFICATION_SYSTEM_PROMPT)
     except (ImportError, ValueError) as e:
         print(f"Error: {e}")
         return None
@@ -399,7 +523,7 @@ def ai_resolve_clarifications(
         print(f"Error: AI returned invalid JSON: {e}")
         return None
     except Exception as e:
-        print(f"Error calling Gemini API: {e}")
+        print(f"Error calling LLM API: {e}")
         return None
 
 
@@ -410,7 +534,7 @@ def ai_merge(
     issues: List[ValidationIssue],
     conflicted_files: Optional[List[str]] = None,
 ) -> Optional[Dict[str, dict]]:
-    """Use Gemini API to resolve merge conflicts (legacy one-shot API).
+    """Use LLM API to resolve merge conflicts (legacy one-shot API).
 
     Args:
         base_files: Domain files from merge base
@@ -422,6 +546,38 @@ def ai_merge(
     Returns:
         Dict of resolved domain files, or None if resolution fails
     """
+    config = load_llm_config()
+    
+    if config.provider == "openai":
+        try:
+            from openai import OpenAI
+        except ImportError:
+            print("Error: 'openai' package not installed. Run: pip install openai")
+            return None
+        
+        if not config.base_url:
+            print("Error: VIT_LLM_URL not set.")
+            return None
+        
+        client = OpenAI(base_url=config.base_url, api_key=config.api_key or "not-needed")
+        
+        prompt = _build_merge_prompt(
+            base_files, ours_files, theirs_files, issues, conflicted_files or []
+        )
+        
+        try:
+            model = LocalLLMModel(
+                client=client,
+                model=config.model or "qwen2.5-coder:14b",
+                system_instruction=MERGE_SYSTEM_PROMPT
+            )
+            response = model.generate_content(prompt)
+            return _extract_json_from_response(response.text)
+        except Exception as e:
+            print(f"Error calling OpenAI-compatible API: {e}")
+            return None
+    
+    # Gemini path
     try:
         import google.generativeai as genai
     except ImportError:
@@ -685,7 +841,7 @@ def analyze_branch_comparison(
         Dict with summary, conflicts, recommendation, and explanation
     """
     try:
-        model = _get_genai_model("You are a video editing merge advisor.")
+        model = _get_llm_model("You are a video editing merge advisor.")
     except (ImportError, ValueError) as e:
         return {
             "summary_a": f"Branch with {sum(len(v) for v in changes_a.values())} changes",
@@ -778,7 +934,7 @@ def classify_commit_type(
     files_changed: List[str],
     message: str = "",
 ) -> str:
-    """Use Gemini to classify a commit's primary category.
+    """Use LLM to classify a commit's primary category.
 
     Args:
         commit_hash: Short commit hash
@@ -805,7 +961,7 @@ def classify_commit_type(
 
     # Use AI for ambiguous cases
     try:
-        model = _get_genai_model("You are a video editing commit classifier.")
+        model = _get_llm_model("You are a video editing commit classifier.")
     except (ImportError, ValueError):
         # Fallback to simple heuristic
         from .core import categorize_commit
@@ -852,7 +1008,7 @@ Return ONLY the commit message text, nothing else.
 
 
 def suggest_commit_message(diff_text: str) -> Optional[str]:
-    """Use Gemini to suggest a commit message based on timeline diff.
+    """Use LLM to suggest a commit message based on timeline diff.
 
     Args:
         diff_text: Human-readable diff output from differ.py
@@ -864,7 +1020,7 @@ def suggest_commit_message(diff_text: str) -> Optional[str]:
         return None
 
     try:
-        model = _get_genai_model("You are a video editing commit message writer.")
+        model = _get_llm_model("You are a video editing commit message writer.")
     except (ImportError, ValueError):
         return None
 
@@ -897,7 +1053,7 @@ Return ONLY the summary text, nothing else.
 
 
 def summarize_log(commits_text: str) -> Optional[str]:
-    """Use Gemini to summarize recent commit history.
+    """Use LLM to summarize recent commit history.
 
     Args:
         commits_text: Formatted git log output
@@ -909,7 +1065,7 @@ def summarize_log(commits_text: str) -> Optional[str]:
         return None
 
     try:
-        model = _get_genai_model("You are a video editing project summarizer.")
+        model = _get_llm_model("You are a video editing project summarizer.")
     except (ImportError, ValueError):
         return None
 
