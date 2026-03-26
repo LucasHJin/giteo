@@ -205,6 +205,12 @@ Set `GEMINI_API_KEY` in your environment or project `.env` file to enable AI fea
 python -m pytest tests/
 ```
 
+## Contributions
+
+We are not accepting external pull requests at this time.
+
+Please feel free to fork the project and build on it independently!
+
 ## License
 
 MIT
