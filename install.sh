@@ -87,6 +87,8 @@ if ! command -v vit &>/dev/null; then
         SHELL_RC="$HOME/.bashrc"
     elif [ -f "$HOME/.bash_profile" ]; then
         SHELL_RC="$HOME/.bash_profile"
+    elif [ -f "$HOME/.profile" ]; then
+        SHELL_RC="$HOME/.profile"
     fi
     if [ -n "$SHELL_RC" ] && ! grep -q "$VIT_BIN" "$SHELL_RC" 2>/dev/null; then
         echo "export PATH=\"$VIT_BIN:\$PATH\"" >> "$SHELL_RC"
@@ -112,7 +114,7 @@ echo ""
 echo "  Vit installed successfully!"
 echo ""
 echo "  Next steps:"
-echo "    1. Restart your terminal (or run: source ~/.zshrc)"
+echo "    1. Restart your terminal (or run: source ${SHELL_RC:-~/.bashrc})"
 echo "    2. Create and open your project in DaVinci Resolve"
 echo "    3. Run: vit init your-project-name (in your terminal)"
 echo "       (creates a vit tracking folder anywhere on disk — location doesn't matter)"

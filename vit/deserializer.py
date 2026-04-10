@@ -1259,7 +1259,9 @@ def _get_resolve_lut_vit_dir() -> str:
             "Blackmagic Design", "DaVinci Resolve", "Support", "LUT",
         )
     else:
-        return ""
+        base = os.path.expanduser(
+            "~/.local/share/DaVinciResolve/LUT"
+        )
     return os.path.join(base, "vit")
 
 

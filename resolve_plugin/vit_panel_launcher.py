@@ -97,8 +97,8 @@ def _find_system_python():
         # PATH fallbacks
         for name in ("python3", "python"):
             candidates.append(name)
-    else:
-        # macOS / Linux
+    elif sys.platform == "darwin":
+        # macOS
         candidates += [
             "/usr/local/bin/python3",
             "/usr/bin/python3",
@@ -111,6 +111,21 @@ def _find_system_python():
         ]:
             for p in sorted(glob.glob(pattern), reverse=True):
                 if not p.endswith(("-config", "-intel64")):
+                    candidates.append(p)
+        home = os.path.expanduser("~")
+        candidates.append(os.path.join(home, ".pyenv", "shims", "python3"))
+    else:
+        # Linux
+        candidates += [
+            "/usr/bin/python3",
+            "/usr/local/bin/python3",
+        ]
+        for pattern in [
+            "/usr/bin/python3.*",
+            "/usr/local/bin/python3.*",
+        ]:
+            for p in sorted(glob.glob(pattern), reverse=True):
+                if not p.endswith(("-config",)):
                     candidates.append(p)
         home = os.path.expanduser("~")
         candidates.append(os.path.join(home, ".pyenv", "shims", "python3"))

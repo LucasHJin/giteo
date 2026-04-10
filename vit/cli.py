@@ -484,9 +484,13 @@ if sys.platform == "win32":
         "Scripts",
         "Edit",
     )
-else:
+elif sys.platform == "darwin":
     RESOLVE_SCRIPTS_DIR = os.path.expanduser(
         "~/Library/Application Support/Blackmagic Design/DaVinci Resolve/Fusion/Scripts/Edit"
+    )
+else:
+    RESOLVE_SCRIPTS_DIR = os.path.expanduser(
+        "~/.local/share/DaVinciResolve/Fusion/Scripts/Edit"
     )
 
 RESOLVE_SCRIPT_NAMES = [
