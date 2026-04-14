@@ -30,14 +30,19 @@ $PYTHON = $null
 foreach ($cmd in @("python3", "python")) {
     $found = Get-Command $cmd -ErrorAction SilentlyContinue
     if ($found) {
-        $versionOutput = & $cmd --version 2>&1
-        if ($versionOutput -match "(\d+)\.(\d+)") {
-            $major = [int]$Matches[1]
-            $minor = [int]$Matches[2]
-            if ($major -ge 3 -and $minor -ge 8) {
-                $PYTHON = $cmd
-                break
+        try {
+            $versionOutput = & $cmd --version 2>&1
+            if ($versionOutput -match "(\d+)\.(\d+)") {
+                $major = [int]$Matches[1]
+                $minor = [int]$Matches[2]
+                if ($major -ge 3 -and $minor -ge 8) {
+                    $PYTHON = $cmd
+                    break
+                }
             }
+        } catch {
+            # python3 on Windows may be a Store redirect alias that fails; skip it
+            continue
         }
     }
 }
@@ -109,13 +114,20 @@ if (-not ($userPath -split ';' | Where-Object { $_ -eq $VIT_BIN })) {
 # ── Install Resolve plugin scripts ───────────
 
 Write-Host "  Installing DaVinci Resolve scripts..."
-$vitExe = "$VIT_BIN\vit.exe"
-if (Test-Path $vitExe) {
-    & $vitExe install-resolve
-} else {
-    try {
-        & "$VIT_VENV\Scripts\python.exe" -m vit.cli install-resolve
-    } catch {
+# Prefer python module over vit.exe — the exe may be blocked by antivirus on Windows
+try {
+    & "$VIT_VENV\Scripts\python.exe" -m vit.cli install-resolve
+} catch {
+    $vitExe = "$VIT_BIN\vit.exe"
+    if (Test-Path $vitExe) {
+        try {
+            & $vitExe install-resolve
+        } catch {
+            Write-Host ""
+            Write-Host "  Note: Could not auto-install Resolve scripts."
+            Write-Host "  After restarting your terminal, run: vit install-resolve"
+        }
+    } else {
         Write-Host ""
         Write-Host "  Note: Could not auto-install Resolve scripts."
         Write-Host "  After restarting your terminal, run: vit install-resolve"
@@ -131,7 +143,7 @@ Write-Host "  Next steps:"
 Write-Host "    1. Restart your terminal"
 Write-Host "    2. Create and open your project in DaVinci Resolve"
 Write-Host "    3. Run: vit init your-project-name (in your terminal)"
-Write-Host "       (creates a vit tracking folder anywhere on disk — location doesn't matter)"
+Write-Host "       (creates a vit tracking folder anywhere on disk -- location doesn't matter)"
 Write-Host "    4. Run: vit collab setup"
 Write-Host "       (connect to a GitHub repo so your team can share the project)"
 Write-Host "    5. In Resolve: Workspace > Scripts > Vit"
