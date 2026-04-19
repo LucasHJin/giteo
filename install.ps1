@@ -1,7 +1,7 @@
-# ─────────────────────────────────────────────
-#  Vit Installer — Git for Video Editing (Windows)
+# ---------------------------------------------
+#  Vit Installer -- Git for Video Editing (Windows)
 #  Usage: irm https://raw.githubusercontent.com/LucasHJin/vit/main/install.ps1 | iex
-# ─────────────────────────────────────────────
+# ---------------------------------------------
 
 $ErrorActionPreference = "Stop"
 
@@ -10,11 +10,11 @@ $VIT_SRC = "$VIT_HOME\vit-src"
 $REPO_URL = "https://github.com/LucasHJin/vit.git"
 
 Write-Host ""
-Write-Host "  Vit — Git for Video Editing"
-Write-Host "  ─────────────────────────────"
+Write-Host "  Vit -- Git for Video Editing"
+Write-Host "  -----------------------------"
 Write-Host ""
 
-# ── Check prerequisites ──────────────────────
+# -- Check prerequisites ----------------------
 
 function Check-Command($name) {
     if (-not (Get-Command $name -ErrorAction SilentlyContinue)) {
@@ -30,15 +30,17 @@ $PYTHON = $null
 foreach ($cmd in @("python3", "python")) {
     $found = Get-Command $cmd -ErrorAction SilentlyContinue
     if ($found) {
-        $versionOutput = & $cmd --version 2>&1
-        if ($versionOutput -match "(\d+)\.(\d+)") {
-            $major = [int]$Matches[1]
-            $minor = [int]$Matches[2]
-            if ($major -ge 3 -and $minor -ge 8) {
-                $PYTHON = $cmd
-                break
+        try {
+            $versionOutput = & $cmd --version 2>&1
+            if ($versionOutput -match "(\d+)\.(\d+)") {
+                $major = [int]$Matches[1]
+                $minor = [int]$Matches[2]
+                if ($major -ge 3 -and $minor -ge 8) {
+                    $PYTHON = $cmd
+                    break
+                }
             }
-        }
+        } catch { continue }
     }
 }
 
@@ -63,7 +65,7 @@ if (-not $hasPip) {
     exit 1
 }
 
-# ── Download / update source ─────────────────
+# -- Download / update source -----------------
 
 if (-not (Test-Path $VIT_HOME)) {
     New-Item -ItemType Directory -Path $VIT_HOME -Force | Out-Null
@@ -80,7 +82,7 @@ if (Test-Path "$VIT_SRC\.git") {
     git clone --quiet $REPO_URL $VIT_SRC
 }
 
-# ── Install into venv ───────────────────────
+# -- Install into venv -----------------------
 
 $VIT_VENV = "$VIT_HOME\venv"
 
@@ -92,7 +94,7 @@ if (-not (Test-Path $VIT_VENV)) {
 Write-Host "  Installing Vit package..."
 & "$VIT_VENV\Scripts\pip.exe" install $VIT_SRC --quiet
 
-# ── Add venv Scripts to PATH ─────────────────
+# -- Add venv Scripts to PATH -----------------
 
 $VIT_BIN = "$VIT_VENV\Scripts"
 $userPath = [System.Environment]::GetEnvironmentVariable("PATH", "User")
@@ -106,23 +108,26 @@ if (-not ($userPath -split ';' | Where-Object { $_ -eq $VIT_BIN })) {
     )
 }
 
-# ── Install Resolve plugin scripts ───────────
+# -- Write vit.cmd wrapper (avoids Defender blocking vit.exe) ----
 
-Write-Host "  Installing DaVinci Resolve scripts..."
-$vitExe = "$VIT_BIN\vit.exe"
-if (Test-Path $vitExe) {
-    & $vitExe install-resolve
-} else {
-    try {
-        & "$VIT_VENV\Scripts\python.exe" -m vit.cli install-resolve
-    } catch {
-        Write-Host ""
-        Write-Host "  Note: Could not auto-install Resolve scripts."
-        Write-Host "  After restarting your terminal, run: vit install-resolve"
-    }
+$vitCmd = "$VIT_BIN\vit.cmd"
+if (-not (Test-Path $vitCmd)) {
+    Write-Host "  Writing vit.cmd wrapper..."
+    Set-Content -Path $vitCmd -Value "@`"%~dp0python.exe`" -m vit.cli %*" -Encoding ASCII
 }
 
-# ── Done ──────────────────────────────────────
+# -- Install Resolve plugin scripts -----------
+
+Write-Host "  Installing DaVinci Resolve scripts..."
+try {
+    & "$VIT_VENV\Scripts\python.exe" -m vit.cli install-resolve
+} catch {
+    Write-Host ""
+    Write-Host "  Note: Could not auto-install Resolve scripts."
+    Write-Host "  After restarting your terminal, run: vit install-resolve"
+}
+
+# -- Done -------------------------------------
 
 Write-Host ""
 Write-Host "  Vit installed successfully!"
@@ -131,7 +136,7 @@ Write-Host "  Next steps:"
 Write-Host "    1. Restart your terminal"
 Write-Host "    2. Create and open your project in DaVinci Resolve"
 Write-Host "    3. Run: vit init your-project-name (in your terminal)"
-Write-Host "       (creates a vit tracking folder anywhere on disk — location doesn't matter)"
+Write-Host "       (creates a vit tracking folder anywhere on disk -- location doesn't matter)"
 Write-Host "    4. Run: vit collab setup"
 Write-Host "       (connect to a GitHub repo so your team can share the project)"
 Write-Host "    5. In Resolve: Workspace > Scripts > Vit"

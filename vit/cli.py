@@ -546,7 +546,7 @@ def cmd_install_resolve(args):
             shutil.copy2(source, dest)
         else:
             os.symlink(source, dest)
-        print(f"  Linked: {menu_name} → {source}")
+        print(f"  Linked: {menu_name} -> {source}")
 
     # Save the repo root path so Resolve scripts can find the vit package
     # even if __file__ or symlink resolution fails in Resolve's Python
@@ -584,7 +584,7 @@ def cmd_remote(args):
 
     if args.remote_cmd == "add":
         git_remote_add(project_dir, args.name, args.url)
-        print(f"  Added remote '{args.name}' → {args.url}")
+        print(f"  Added remote '{args.name}' -> {args.url}")
 
     elif args.remote_cmd == "list" or args.remote_cmd is None:
         remotes = git_remote_list(project_dir)
@@ -650,7 +650,7 @@ def _print_ssh_instructions(url: str, remote_name: str) -> None:
         print(f"    git remote set-url {remote_name} {ssh_url}")
     else:
         print("  Use the SSH URL from GitHub: git@github.com:username/repo.git")
-        print("  (On the repo page, click Code → SSH to copy it)")
+        print("  (On the repo page, click Code -> SSH to copy it)")
     print()
     print("  Then re-run: vit collab setup")
 
